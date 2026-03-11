@@ -1,0 +1,100 @@
+from typing import Optional
+
+import pandas as pd
+
+from .matching import (
+    buscar_match_exacto,
+    construir_indice_codigos,
+    recuperar_candidatos,
+)
+from .modelo import ModeloMatchCodProducto
+from .preparacion import preparar_facturas, preparar_maestro
+
+
+def inferir_codproducto(
+    facturas_nuevas: pd.DataFrame,
+    maestro: pd.DataFrame,
+    modelo_match: ModeloMatchCodProducto,
+    top_k: int = 3,
+    umbral_match: Optional[float] = None,
+    top_n_candidatos: int = 30,
+) -> pd.DataFrame:
+    if umbral_match is None:
+        umbral_match = getattr(modelo_match, "best_threshold", 0.65)
+
+    maestro_p = preparar_maestro(maestro)
+    fact_p = preparar_facturas(facturas_nuevas)
+    idx = construir_indice_codigos(maestro_p)
+
+    resultados = []
+
+    for _, f in fact_p.iterrows():
+        exacto = buscar_match_exacto(f, maestro_p, idx)
+
+        if exacto is not None:
+            row = exacto.to_dict()
+            row.update({
+                "OrigenCandidato": "EXACTO",
+                "TipoResultado": "EXACTO",
+                "Score": 1.0,
+                "CodFactura": f["CodProducto"],
+                "ProductoFactura": f["Producto"],
+                "UnidadFactura": f["UnidaMedidaCompra"],
+                "CostoFactura": f["CostoCaja"],
+                "Rank": 1,
+            })
+            resultados.append(row)
+            continue
+
+        cand = recuperar_candidatos(f, maestro_p, top_n=top_n_candidatos)
+
+        if cand.empty:
+            resultados.append({
+                "RucProveedor": f["RucProveedor"],
+                "CodFactura": f["CodProducto"],
+                "ProductoFactura": f["Producto"],
+                "UnidadFactura": f["UnidaMedidaCompra"],
+                "CostoFactura": f["CostoCaja"],
+                "TipoResultado": "SIN_CANDIDATOS",
+                "Score": 0.0,
+                "Rank": 1,
+            })
+            continue
+
+        pares = pd.DataFrame({
+            "fact_text": [f["Producto_norm"]] * len(cand),
+            "fact_unit": [f["Unidad_norm"]] * len(cand),
+            "fact_cost": [f["Costo_log"]] * len(cand),
+            "master_text": cand["Producto_norm"].values,
+            "master_unit": cand["Unidad_norm"].values,
+            "master_cost": cand["Costo_log"].values,
+            "label": [0] * len(cand),
+        })
+
+        probs = modelo_match.predict_pairs(pares)
+
+        cand = cand.copy()
+        cand["Score"] = probs
+        cand = cand.sort_values(["Score", "heuristica"], ascending=False).head(top_k)
+
+        mejor = cand.iloc[0]
+        tipo = "TENTATIVO" if mejor["Score"] >= umbral_match else "POSIBLE_NUEVO_PRODUCTO"
+
+        for rank, (_, c) in enumerate(cand.iterrows(), start=1):
+            row = c.drop(
+                labels=["Producto_norm", "Unidad_norm", "Costo_log", "heuristica"],
+                errors="ignore",
+            ).to_dict()
+
+            row.update({
+                "TipoResultado": tipo if rank == 1 else "ALTERNATIVA",
+                "CodFactura": f["CodProducto"],
+                "ProductoFactura": f["Producto"],
+                "UnidadFactura": f["UnidaMedidaCompra"],
+                "CostoFactura": f["CostoCaja"],
+                "Rank": rank,
+            })
+
+            resultados.append(row)
+
+    return pd.DataFrame(resultados)

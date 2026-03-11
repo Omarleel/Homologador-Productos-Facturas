@@ -1,0 +1,51 @@
+# === Python / Entorno ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+bin/
+lib/
+develop-eggs/
+dist/
+eggs/
+installed.files/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+
+# === TensorFlow / Keras ===
+# No subir los modelos entrenados (son pesados y cambian en cada training)
+modelo_homologacion_v1/
+*.keras
+*.h5
+*.weights.h5
+*.npy
+
+# === Datos / CSVs (Importante por Privacidad/Seguridad) ===
+# No subir los datos maestros ni el historial por seguridad de la empresa
+maestro.csv
+historial_facturas.csv
+facturas_nuevas.csv
+resultado_inferencia.csv
+*.xlsx
+*.xls
+
+# === Logs y Configuración de Sistema ===
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDEs (VS Code / PyCharm) ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Git-filter-repo / Residuos de limpieza ===
+# Para que no queden rastros si vuelves a limpiar metadatos de "KatashiTetsu"
+*.bak
