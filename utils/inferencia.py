@@ -7,14 +7,14 @@ from .matching import (
     construir_indice_codigos,
     recuperar_candidatos,
 )
-from .modelo import ModeloMatchCodProducto
+from core.model import ModeloMatchProducto
 from .preparacion import preparar_facturas, preparar_maestro
 
 
 def inferir_codproducto(
     facturas_nuevas: pd.DataFrame,
     maestro: pd.DataFrame,
-    modelo_match: ModeloMatchCodProducto,
+    modelo_match: ModeloMatchProducto,
     top_k: int = 3,
     umbral_match: Optional[float] = None,
     top_n_candidatos: int = 40,

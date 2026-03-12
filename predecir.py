@@ -1,21 +1,44 @@
+from __future__ import annotations
+
 import pandas as pd
 
-from homologacion import (
-    inferir_codproducto,
-    init_seeds,
+from utils import inferir_codproducto, init_seeds
+from utils.config import (
+    dataset_path,
+    ensure_project_dirs,
+    model_path,
+    require_file,
+    result_path,
 )
-from homologacion.modelo_2 import ModeloMatchCodProducto
+from core.model import ModeloMatchProducto
+
+
+MODELO_NOMBRE = "homologacion_v2"
+ARCHIVO_MAESTRO = "maestro.csv"
+ARCHIVO_FACTURAS_NUEVAS = "facturas_nuevas.csv"
+
+ARCHIVO_RESULTADO_TECNICO = "resultado_inferencia.csv"
+ARCHIVO_RESULTADO_RESUMIDO = "match_final_resumido.csv"
+
 
 def main() -> None:
     init_seeds()
+    ensure_project_dirs()
 
-    maestro = pd.read_csv("maestro.csv", encoding="utf-8-sig")
-    nuevas = pd.read_csv("facturas_nuevas.csv", encoding="utf-8-sig")
+    maestro_path = require_file(dataset_path(ARCHIVO_MAESTRO), "dataset maestro")
+    nuevas_path = require_file(
+        dataset_path(ARCHIVO_FACTURAS_NUEVAS),
+        "dataset facturas_nuevas",
+    )
+    ruta_modelo = require_file(model_path(MODELO_NOMBRE), "directorio del modelo")
+
+    maestro = pd.read_csv(maestro_path, encoding="utf-8-sig")
+    nuevas = pd.read_csv(nuevas_path, encoding="utf-8-sig")
 
     print("COLUMNAS maestro:", [repr(c) for c in maestro.columns])
     print("COLUMNAS nuevas:", [repr(c) for c in nuevas.columns])
 
-    modelo = ModeloMatchCodProducto.cargar("modelo_homologacion_v2")
+    modelo = ModeloMatchProducto.cargar(ruta_modelo)
 
     resultado = inferir_codproducto(
         facturas_nuevas=nuevas,
@@ -26,25 +49,22 @@ def main() -> None:
         top_n_candidatos=40,
     )
 
-    resultado.to_csv("resultado_inferencia.csv", sep=';', index=False, encoding="utf-8-sig")
-    
+    resultado_path = result_path(ARCHIVO_RESULTADO_TECNICO)
+    resultado.to_csv(resultado_path, sep=";", index=False, encoding="utf-8-sig")
+
     resumido = resultado[resultado["Rank"] == 1].copy()
 
-    # Seleccionamos solo las columnas clave para el usuario final
     columnas_finales = [
         "RucProveedor",
         "CodFactura",
         "ProductoFactura",
         "UnidadFactura",
-        "CodProducto",       # Este es el código en tu Maestro
-        "Producto",          # Este es el nombre en tu Maestro
-        "TipoResultado"      # Indica si fue EXACTO, TENTATIVO o POSIBLE_NUEVO
+        "CodProducto",
+        "Producto",
+        "TipoResultado",
     ]
-
-    # Nos aseguramos de que solo existan estas columnas
     resumido = resumido[columnas_finales]
 
-    # Renombramos para que sea más claro para quien lea el Excel/CSV
     resumido.columns = [
         "RUC_PROVEEDOR",
         "COD_PRODUCTO_FACTURA",
@@ -52,14 +72,15 @@ def main() -> None:
         "UM_FACTURA",
         "COD_PRODUCTO_SISTEMA",
         "NOMBRE_PRODUCTO_SISTEMA",
-        "ESTADO_MATCH"
+        "ESTADO_MATCH",
     ]
 
-    resumido.to_csv("match_final_resumido.csv", sep=';', index=False, encoding="utf-8-sig")
-    
+    resumido_path = result_path(ARCHIVO_RESULTADO_RESUMIDO)
+    resumido.to_csv(resumido_path, sep=";", index=False, encoding="utf-8-sig")
+
     print("\n--- PROCESO FINALIZADO ---")
-    print("Archivo técnico: 'resultado_inferencia_completo.csv'")
-    print("Archivo resumen: 'match_final_resumido.csv'")
+    print(f"Archivo técnico: '{resultado_path}'")
+    print(f"Archivo resumen: '{resumido_path}'")
     print(resumido.head(10))
 
 
