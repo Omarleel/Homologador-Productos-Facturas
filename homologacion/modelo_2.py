@@ -6,8 +6,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.metrics import fbeta_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split
-
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 
 class ModeloMatchCodProducto:
     def __init__(
@@ -657,9 +656,26 @@ class ModeloMatchCodProducto:
             "presentation_gate",
         )([gate_mean, gate_min])
 
-        y = tf.keras.layers.Multiply(name="match_prob")(
-            [pre_prob, presentation_gate]
-        )
+        fusion2 = tf.keras.layers.Concatenate(name="fusion_with_gate")([
+            x,
+            presentation_gate,
+            gate_mean,
+            gate_min,
+            type_gate,
+            factor_gate,
+            content_gate,
+            total_gate,
+            peso_gate,
+        ])
+
+        fusion2 = tf.keras.layers.Dense(
+            64,
+            activation="relu",
+            kernel_regularizer=tf.keras.regularizers.l2(self.l2_reg),
+        )(fusion2)
+        fusion2 = tf.keras.layers.Dropout(self.dropout_rate)(fusion2)
+
+        y = tf.keras.layers.Dense(1, activation="sigmoid", name="match_prob")(fusion2)
 
         model = tf.keras.Model(
             inputs=[
@@ -738,35 +754,38 @@ class ModeloMatchCodProducto:
         return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     def fit(self, pares: pd.DataFrame, epochs: int = 12, batch_size: int = 256) -> None:
-        self.adaptar_vocabularios(pares)
+        groups = (
+            pares["RucProveedor"].astype(str).fillna("") + "|" +
+            pares["fact_cod"].astype(str).fillna("") + "|" +
+            pares["fact_text"].astype(str).fillna("")
+        )
+
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        train_idx, valid_idx = next(gss.split(pares, pares["label"], groups=groups))
+
+        train_df = pares.iloc[train_idx].copy().reset_index(drop=True)
+        valid_df = pares.iloc[valid_idx].copy().reset_index(drop=True)
+
+        self.adaptar_vocabularios(train_df)
 
         if self.model is None:
             self.construir()
 
         self.cost_normalizer.adapt(
-            np.concatenate([pares["fact_cost"].values, pares["master_cost"].values]).reshape(-1, 1)
+            np.concatenate([train_df["fact_cost"].values, train_df["master_cost"].values]).reshape(-1, 1)
         )
         self.peso_normalizer.adapt(
-            np.concatenate([pares["fact_peso"].values, pares["master_peso"].values]).reshape(-1, 1)
+            np.concatenate([train_df["fact_peso"].values, train_df["master_peso"].values]).reshape(-1, 1)
         )
         self.factor_normalizer.adapt(
-            np.concatenate([pares["fact_factor"].values, pares["master_factor"].values]).reshape(-1, 1)
+            np.concatenate([train_df["fact_factor"].values, train_df["master_factor"].values]).reshape(-1, 1)
         )
         self.content_normalizer.adapt(
-            np.concatenate([pares["fact_content"].values, pares["master_content"].values]).reshape(-1, 1)
+            np.concatenate([train_df["fact_content"].values, train_df["master_content"].values]).reshape(-1, 1)
         )
         self.total_normalizer.adapt(
-            np.concatenate([pares["fact_total"].values, pares["master_total"].values]).reshape(-1, 1)
+            np.concatenate([train_df["fact_total"].values, train_df["master_total"].values]).reshape(-1, 1)
         )
-
-        train_df, valid_df = train_test_split(
-            pares,
-            test_size=0.2,
-            random_state=42,
-            stratify=pares["label"],
-        )
-
-        train_df = train_df.copy()
 
         n_pos = max(int((train_df["label"] == 1).sum()), 1)
         n_neg = max(int((train_df["label"] == 0).sum()), 1)
@@ -787,8 +806,8 @@ class ModeloMatchCodProducto:
 
         same_type = (train_df["fact_type"].astype(str).values == train_df["master_type"].astype(str).values).astype(np.float32)
         known_type = (
-            (train_df["fact_type"].astype(str).values != "NONE")
-            & (train_df["master_type"].astype(str).values != "NONE")
+            (train_df["fact_type"].astype(str).values != "NONE") &
+            (train_df["master_type"].astype(str).values != "NONE")
         ).astype(np.float32)
 
         same_base = (
@@ -820,17 +839,10 @@ class ModeloMatchCodProducto:
             + (1.6 * conflicto_presentacion[neg_mask] * bonus_mismo_nombre[neg_mask])
         )
 
-        ds_train = self._to_ds(
-            train_df,
-            sample_weight=sample_weight,
-            batch_size=batch_size,
-            shuffle=True,
-        )
-        ds_valid = self._to_ds(
-            valid_df,
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        sample_weight = np.clip(sample_weight, 1.0, 6.0)
+
+        ds_train = self._to_ds(train_df, sample_weight=sample_weight, batch_size=batch_size, shuffle=True)
+        ds_valid = self._to_ds(valid_df, batch_size=batch_size, shuffle=False)
 
         callbacks = [
             tf.keras.callbacks.EarlyStopping(
@@ -861,19 +873,19 @@ class ModeloMatchCodProducto:
         y_valid = valid_df["label"].astype(int).values
         p_valid = self.model.predict(ds_valid, verbose=0).reshape(-1)
 
-        best_th = 0.78
+        best_th = 0.50
         best_score = -1.0
         best_precision = -1.0
         best_recall = -1.0
 
-        for th in np.arange(0.45, 0.98, 0.01):
+        for th in np.arange(0.30, 0.98, 0.01):
             y_hat = (p_valid >= th).astype(int)
             prec = precision_score(y_valid, y_hat, zero_division=0)
             rec = recall_score(y_valid, y_hat, zero_division=0)
-            f05 = fbeta_score(y_valid, y_hat, beta=0.5, zero_division=0)
+            f1 = fbeta_score(y_valid, y_hat, beta=1.0, zero_division=0)
 
-            if (f05 > best_score) or (f05 == best_score and prec > best_precision):
-                best_score = float(f05)
+            if (f1 > best_score) or (f1 == best_score and prec > best_precision):
+                best_score = float(f1)
                 best_precision = float(prec)
                 best_recall = float(rec)
                 best_th = float(th)
@@ -881,9 +893,8 @@ class ModeloMatchCodProducto:
         self.best_threshold = best_th
         print(
             f"Mejor umbral validación: {self.best_threshold:.2f} | "
-            f"F0.5={best_score:.4f} | precision={best_precision:.4f} | recall={best_recall:.4f}"
+            f"F1={best_score:.4f} | precision={best_precision:.4f} | recall={best_recall:.4f}"
         )
-
     def predict_pairs(self, pares: pd.DataFrame, batch_size: int = 512) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("Debes entrenar o cargar el modelo antes de predecir.")
