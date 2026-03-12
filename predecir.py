@@ -1,10 +1,10 @@
 import pandas as pd
 
 from homologacion import (
-    init_seeds,
     inferir_codproducto,
+    init_seeds,
 )
-from homologacion.modelo import ModeloMatchCodProducto
+from homologacion.modelo_2 import ModeloMatchCodProducto
 
 def main() -> None:
     init_seeds()
@@ -15,7 +15,7 @@ def main() -> None:
     print("COLUMNAS maestro:", [repr(c) for c in maestro.columns])
     print("COLUMNAS nuevas:", [repr(c) for c in nuevas.columns])
 
-    modelo = ModeloMatchCodProducto.cargar("modelo_homologacion_v1")
+    modelo = ModeloMatchCodProducto.cargar("modelo_homologacion_v2")
 
     resultado = inferir_codproducto(
         facturas_nuevas=nuevas,
@@ -23,7 +23,7 @@ def main() -> None:
         modelo_match=modelo,
         top_k=3,
         umbral_match=modelo.best_threshold,
-        top_n_candidatos=50,
+        top_n_candidatos=40,
     )
 
     resultado.to_csv("resultado_inferencia.csv", index=False, encoding="utf-8-sig")

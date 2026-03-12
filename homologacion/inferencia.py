@@ -1,5 +1,5 @@
 from typing import Optional
-
+import numpy as np
 import pandas as pd
 
 from .matching import (
@@ -17,10 +17,10 @@ def inferir_codproducto(
     modelo_match: ModeloMatchCodProducto,
     top_k: int = 3,
     umbral_match: Optional[float] = None,
-    top_n_candidatos: int = 30,
+    top_n_candidatos: int = 40,
 ) -> pd.DataFrame:
     if umbral_match is None:
-        umbral_match = getattr(modelo_match, "best_threshold", 0.65)
+        umbral_match = getattr(modelo_match, "best_threshold", 0.72)
 
     maestro_p = preparar_maestro(maestro)
     fact_p = preparar_facturas(facturas_nuevas)
@@ -39,8 +39,13 @@ def inferir_codproducto(
                 "Score": 1.0,
                 "CodFactura": f["CodProducto"],
                 "ProductoFactura": f["Producto"],
+                "ProductoFacturaBase": f["Producto_base_norm"],
                 "UnidadFactura": f["UnidaMedidaCompra"],
                 "CostoFactura": f["CostoCaja"],
+                "FactorFactura": f["FactorConversion"],
+                "ContenidoFactura": f["ContenidoUnidad"],
+                "ContenidoTotalFactura": f["ContenidoTotal"],
+                "TipoContenidoFactura": f["TipoContenido"],
                 "Rank": 1,
             })
             resultados.append(row)
@@ -53,8 +58,13 @@ def inferir_codproducto(
                 "RucProveedor": f["RucProveedor"],
                 "CodFactura": f["CodProducto"],
                 "ProductoFactura": f["Producto"],
+                "ProductoFacturaBase": f["Producto_base_norm"],
                 "UnidadFactura": f["UnidaMedidaCompra"],
                 "CostoFactura": f["CostoCaja"],
+                "FactorFactura": f["FactorConversion"],
+                "ContenidoFactura": f["ContenidoUnidad"],
+                "ContenidoTotalFactura": f["ContenidoTotal"],
+                "TipoContenidoFactura": f["TipoContenido"],
                 "TipoResultado": "SIN_CANDIDATOS",
                 "Score": 0.0,
                 "Rank": 1,
@@ -63,21 +73,53 @@ def inferir_codproducto(
 
         pares = pd.DataFrame({
             "fact_text": [f["Producto_norm"]] * len(cand),
+            "fact_base_text": [f["Producto_base_norm"]] * len(cand),
             "fact_unit": [f["Unidad_norm"]] * len(cand),
+            "fact_type": [f["TipoContenido"]] * len(cand),
             "fact_cost": [f["Costo_log"]] * len(cand),
             "fact_peso": [f["PesoUnitario"]] * len(cand),
+            "fact_factor": [f["Factor_log"]] * len(cand),
+            "fact_content": [f["ContenidoUnidad_log"]] * len(cand),
+            "fact_total": [f["ContenidoTotal_log"]] * len(cand),
             "master_text": cand["Producto_norm"].values,
+            "master_base_text": cand["Producto_base_norm"].values,
             "master_unit": cand["Unidad_norm"].values,
+            "master_type": cand["TipoContenido"].values,
             "master_cost": cand["Costo_log"].values,
             "master_peso": cand["PesoUnitario"].values,
+            "master_factor": cand["Factor_log"].values,
+            "master_content": cand["ContenidoUnidad_log"].values,
+            "master_total": cand["ContenidoTotal_log"].values,
             "label": [0] * len(cand),
         })
 
         probs = modelo_match.predict_pairs(pares)
 
         cand = cand.copy()
-        cand["Score"] = probs
-        cand = cand.sort_values(["Score", "heuristica"], ascending=False).head(top_k)
+        cand["ScoreModelo"] = probs
+
+        col_heur = "heuristica_texto" if "heuristica_texto" in cand.columns else "heuristica"
+
+        # Gate léxico: si el texto/familia no se parece, no dejamos que la presentación lo suba.
+        cand["LexicalGate"] = np.clip(
+            (cand[col_heur] - 0.12) / 0.35,
+            0.0,
+            1.0,
+        )
+
+        # La presentación ya no domina; solo ayuda a desempatar dentro de la misma familia.
+        cand["ScoreFinal"] = (
+            0.68 * cand["ScoreModelo"]
+            + 0.22 * cand[col_heur]
+            + 0.10 * cand["score_presentacion"]
+        ) * (0.25 + 0.75 * cand["LexicalGate"])
+
+        cand = cand.sort_values(
+            ["ScoreFinal", "ScoreModelo", col_heur, "tier_presentacion"],
+            ascending=[False, False, False, True],
+        ).head(top_k)
+
+        cand["Score"] = cand["ScoreFinal"]
 
         mejor = cand.iloc[0]
         tipo = "TENTATIVO" if mejor["Score"] >= umbral_match else "POSIBLE_NUEVO_PRODUCTO"
@@ -92,8 +134,13 @@ def inferir_codproducto(
                 "TipoResultado": tipo if rank == 1 else "ALTERNATIVA",
                 "CodFactura": f["CodProducto"],
                 "ProductoFactura": f["Producto"],
+                "ProductoFacturaBase": f["Producto_base_norm"],
                 "UnidadFactura": f["UnidaMedidaCompra"],
                 "CostoFactura": f["CostoCaja"],
+                "FactorFactura": f["FactorConversion"],
+                "ContenidoFactura": f["ContenidoUnidad"],
+                "ContenidoTotalFactura": f["ContenidoTotal"],
+                "TipoContenidoFactura": f["TipoContenido"],
                 "Rank": rank,
             })
 
