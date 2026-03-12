@@ -1,11 +1,110 @@
 import math
-from difflib import SequenceMatcher
-from typing import Dict, Optional, Tuple
 import re
+from difflib import SequenceMatcher
+from functools import lru_cache
+from typing import Dict, Optional, Tuple, FrozenSet
+
 import numpy as np
 import pandas as pd
 
 from .limpieza import normalizar_codigo, normalizar_texto
+
+def _to_text(x) -> str:
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    return str(x)
+
+
+def _to_float(x) -> float:
+    return float(x)
+
+
+@lru_cache(maxsize=200_000)
+def _normalizar_texto_cached(texto: str) -> str:
+    return normalizar_texto(texto)
+
+
+@lru_cache(maxsize=200_000)
+def _token_set_cached(texto: str) -> FrozenSet[str]:
+    return frozenset(t for t in _normalizar_texto_cached(texto).split() if t)
+
+
+@lru_cache(maxsize=200_000)
+def _primeros_tokens_cached(texto: str, n: int) -> Tuple[str, ...]:
+    toks = tuple(t for t in _normalizar_texto_cached(texto).split() if t)
+    return toks[:n]
+
+
+@lru_cache(maxsize=200_000)
+def _tokens_familia_cached(texto: str) -> Tuple[str, ...]:
+    toks = [t for t in _normalizar_texto_cached(texto).split() if t]
+    salida = []
+    for t in toks:
+        if t in FAMILY_STOPWORDS:
+            continue
+        if t.isdigit():
+            continue
+        if len(t) <= 2:
+            continue
+        salida.append(t)
+    return tuple(salida)
+
+
+@lru_cache(maxsize=300_000)
+def _jaccard_cached(a: str, b: str) -> float:
+    if a > b:
+        a, b = b, a
+
+    sa = _token_set_cached(a)
+    sb = _token_set_cached(b)
+
+    if not sa or not sb:
+        return 0.0
+
+    return len(sa & sb) / max(len(sa | sb), 1)
+
+
+@lru_cache(maxsize=300_000)
+def _similitud_log_cached(a: float, b: float, escala: float) -> float:
+    if a > b:
+        a, b = b, a
+    return float(np.exp(-escala * abs(a - b)))
+
+
+@lru_cache(maxsize=200_000)
+def _sequence_ratio_cached(a: str, b: str) -> float:
+    if a > b:
+        a, b = b, a
+    return SequenceMatcher(
+        None,
+        _normalizar_texto_cached(a),
+        _normalizar_texto_cached(b),
+    ).ratio()
+
+_MAESTRO_POR_RUC_CACHE: Dict[Tuple[int, int, Tuple[str, ...]], Dict[str, pd.DataFrame]] = {}
+def _get_maestro_por_ruc(maestro: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    cache_key = (id(maestro), len(maestro), tuple(maestro.columns))
+
+    cached = _MAESTRO_POR_RUC_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    tmp = maestro.copy()
+    tmp["_ruc_norm"] = tmp["RucProveedor"].map(_norm_ruc)
+
+    groups: Dict[str, pd.DataFrame] = {}
+    for ruc, group in tmp.groupby("_ruc_norm", sort=False):
+        g = group.drop(columns=["_ruc_norm"]).reset_index(drop=True)
+        g.attrs = {}
+        groups[ruc] = g
+
+    _MAESTRO_POR_RUC_CACHE[cache_key] = groups
+    return groups
 
 def _norm_ruc(x) -> str:
     if pd.isna(x):
@@ -38,18 +137,18 @@ def _norm_cod(x) -> str:
 
 def construir_indice_codigos(maestro: pd.DataFrame) -> Dict[Tuple[str, str], int]:
     indice: Dict[Tuple[str, str], int] = {}
+    cod_cols = [c for c in ("CodProducto", "CodProducto2", "CodProducto3") if c in maestro.columns]
 
-    for idx, row in maestro.iterrows():
-        ruc = _norm_ruc(row["RucProveedor"])
+    for row in maestro.itertuples(index=True):
+        ruc = _norm_ruc(getattr(row, "RucProveedor", ""))
 
-        for c in ["CodProducto", "CodProducto2", "CodProducto3"]:
-            codigo = _norm_cod(row.get(c, ""))
+        for c in cod_cols:
+            codigo = _norm_cod(getattr(row, c, ""))
 
             if codigo:
-                indice[(ruc, codigo)] = idx
+                indice[(ruc, codigo)] = row.Index
 
     return indice
-
 
 def buscar_match_exacto(
     fila_factura: pd.Series,
@@ -69,21 +168,27 @@ def buscar_match_exacto(
 
 
 def token_set(texto: str) -> set[str]:
-    return set(normalizar_texto(texto).split())
+    return set(_token_set_cached(_to_text(texto)))
 
 
 def jaccard(a: str, b: str) -> float:
-    sa = token_set(a)
-    sb = token_set(b)
-
-    if not sa or not sb:
-        return 0.0
-
-    return len(sa & sb) / max(len(sa | sb), 1)
+    return _jaccard_cached(_to_text(a), _to_text(b))
 
 
 def similitud_log(a: float, b: float, escala: float = 1.0) -> float:
-    return float(np.exp(-escala * abs(float(a) - float(b))))
+    return _similitud_log_cached(_to_float(a), _to_float(b), float(escala))
+
+
+def _tokens_familia(texto: str) -> list[str]:
+    return list(_tokens_familia_cached(_to_text(texto)))
+
+
+def _primeros_tokens(texto: str, n: int = 3) -> Tuple[str, ...]:
+    return _primeros_tokens_cached(_to_text(texto), n)
+
+
+def _overlap_tokens(a: str, b: str) -> int:
+    return len(_token_set_cached(_to_text(a)) & _token_set_cached(_to_text(b)))
 
 
 def _rel_diff(a: float, b: float) -> float:
@@ -124,11 +229,11 @@ def _tokens_familia(texto: str) -> list[str]:
 
 
 def _features_familia(fila_factura: pd.Series, fila_maestro: pd.Series) -> dict:
-    fact = str(fila_factura.get("Producto_base_norm", "") or "")
-    mast = str(fila_maestro.get("Producto_base_norm", "") or "")
+    fact = _to_text(fila_factura.get("Producto_base_norm", ""))
+    mast = _to_text(fila_maestro.get("Producto_base_norm", ""))
 
-    tf = _tokens_familia(fact)
-    tm = _tokens_familia(mast)
+    tf = _tokens_familia_cached(fact)
+    tm = _tokens_familia_cached(mast)
 
     sf = set(tf)
     sm = set(tm)
@@ -148,7 +253,6 @@ def _features_familia(fila_factura: pd.Series, fila_maestro: pd.Series) -> dict:
         "same_prefix2": float(same_prefix2),
     }
 
-
 def _same_family_strict(row: pd.Series) -> bool:
     return bool(
         row["same_prefix2"] == 1.0
@@ -162,88 +266,83 @@ def _same_family_soft(row: pd.Series) -> bool:
         or row["heuristica_texto"] >= 0.55
     )
 
-def _primeros_tokens(texto: str, n: int = 3) -> Tuple[str, ...]:
-    toks = [t for t in normalizar_texto(texto).split() if t]
-    return tuple(toks[:n])
+BONUS_MARCA_CLAVES  = [
+    "BUBBALOO", "CHICLETS", "CLORETS", "CLUB SOCIAL", "FIELD", "HALLS", "RITZ", "TRIDENT",
+    "ARUBA", "BELLA HOLANDESA", "BONLE", "CARTAVIO", "CASA GRANDE", "CHICOLAC", "COMPLETE",
+    "DOLCCI", "DUMMY", "ECOLAT", "GLORIA", "LA FLORENCIA", "LA MESA", "LA PRADERA", "LEAF TEA",
+    "MILKITO", "PRO", "PURA VIDA", "SAN MATEO", "SHAKE", "SOY VIDA", "TAMPICO", "YOFRESH",
+    "YOMOST", "ZEROLACTO", "BARBIE", "CARS", "CLASICA TAN", "CLASICA URBANA", "HAPPY 1",
+    "MAIS LIKE", "MAIS TRANCE", "PRINCESA", "SALOME", "SPIDERMAN", "URBANA", "BEIERSDORF",
+    "COLGATE", "CREST", "DERMEX", "EFILA", "FAPE", "GENOMA LAB", "GOOD BRANDS", "GSK",
+    "HERSIL", "INCASUR", "INTRADEVCO", "LEP", "MARUCHAN", "NINET", "NIVEA", "P&G", "PANASONIC",
+    "RECKITT", "NOEL", "TMLUC", "PARACAS", "PETALO", "SEDITA", "ALACENA", "ALIANZA", "AMARAS",
+    "AMOR", "ANGEL", "AVAL", "BLANCA FLOR", "BOLIVAR", "CAPRI", "CASINO", "COCINERO", "DENTO",
+    "DIA", "DON VITTORIO", "ESPIGA DE ORO", "GEOMEN", "JUMBO", "LA FAVORITA", "LAVAGGI",
+    "MARSELLA", "NICOLINI", "NORCHEFF", "OPAL", "PATITO", "PREMIO", "PRIMOR", "SAPOLIO",
+    "SAYON", "SELLO DE ORO", "TROME", "UMSHA", "VICTORIA", "MIMASKOT", "3 OSITOS", "COSTA",
+    "CAÑONAZO", "CAREZZA", "MOLITALIA", "MARCO POLO", "POMAROLA", "FANNY", "NUTRICAN",
+    "PASCUALINO", "TODINNO", "VIZZIO", "CARICIA", "MONCLER", "ÑA PANCHA", "DON MANOLO",
+    "FORTUNA", "MANPAN", "PALMEROLA", "POPEYE", "SPA", "TONDERO", "ACE", "ALWAYS", "ARIEL",
+    "AYUDIN", "CLEARBLUE", "DOWNY", "GILLETTE", "HEPABIONTA", "HERBAL ESSENCES", "H&S",
+    "OLD SPICE", "ORAL B", "PAMPERS", "PANTENE", "SECRET", "VICK", "BANDIDO", "CANBO",
+    "FRESHCAN", "MICHICAT", "REX", "RICOCAN", "RICOCAT", "RICOCRACK", "SUPERCAN", "SUPERCAT",
+    "THOR", "YAMIS DOG", "VUSE", "INKA KOLA", "CUSQUEÑA", "CRISTAL", "PILSEN CALLAO", "SUBLIME",
+    "DONOFRIO", "TRIANGULO", "MOROCHAS", "CHARADA", "PIQUEO SNAX", "LAY'S", "DORITOS", "CHEETOS", 
+    "CUATES", "CIELO", "PULP", "AJE", "VOLT", "SPORADE", "SABIDIA", "CUMANÁ", "WINTERS", "GN", 
+    "BOLTS", "CUA CUA",     "KIRKLAND", "MAGGI", "NESTLÉ", "NESCAFÉ", "MILO", "IDEAL", "LA LECHERA", "KIRITOS",
+    "COCA COLA", "FRUGOS", "SPRITE", "FANTA", "POWERADE", "AQUAFINA", "PEPSI", "SEVEN UP",
+    "GATORADE", "CONCORDIA", "GUARANA", "SAN CARLOS", "CORONA", "BRAHMA", "PILSEN TRUJILLO",
+    "AREQUIPEÑA", "PILSEN POLAR", "FREE TEA", "BIO AMARANTE", "KR", "ORO", "BIG COLA",
+    "CHITOS", "CHEESE TRIS", "TORTEES", "MANI MOTO", "KARINTO", "FRITO LAY",
+    "HUGGIES", "KOTEX", "SUAVE", "PLENIT", "SCOTT", "ELITE", "NOBLE", "BABYSEC",
+    "LADYSOFT", "POISE", "TENA", "REDOXON", "APRILIS", "UMSHA", "BAMBINO",
+    "ANITA", "COSTEÑO", "PAISANA", "VALLE NORTE", "HOJALMAR", "GRETEL", "CHINCHIN",
+    "GRANJA AZUL", "LA CALERA", "HUACARIZ", "VIGOR", "DANLAC", "TAYTA",
+    "TODINNO", "BAUDUCCO", "MOTTA", "BLANCA FLOR", "SAYON", "DORINA", "MANTEY",
+    "LA DANESA", "MANTY", "STEVIA", "SUCRALOSA", "GLADE", "POETT", "CLOROX",
+    "PINO", "ZORRITO", "PATITO", "SILJET", "RAID", "OFF", "CERINI", "VAPO"
+]
 
-
-def _overlap_tokens(a: str, b: str) -> int:
-    return len(token_set(a) & token_set(b))
-
-
-def bonus_marca(fact_text: str, master_text: str) -> float:
-    claves = [
-        "BUBBALOO", "CHICLETS", "CLORETS", "CLUB SOCIAL", "FIELD", "HALLS", "RITZ", "TRIDENT",
-        "ARUBA", "BELLA HOLANDESA", "BONLE", "CARTAVIO", "CASA GRANDE", "CHICOLAC", "COMPLETE",
-        "DOLCCI", "DUMMY", "ECOLAT", "GLORIA", "LA FLORENCIA", "LA MESA", "LA PRADERA", "LEAF TEA",
-        "MILKITO", "PRO", "PURA VIDA", "SAN MATEO", "SHAKE", "SOY VIDA", "TAMPICO", "YOFRESH",
-        "YOMOST", "ZEROLACTO", "BARBIE", "CARS", "CLASICA TAN", "CLASICA URBANA", "HAPPY 1",
-        "MAIS LIKE", "MAIS TRANCE", "PRINCESA", "SALOME", "SPIDERMAN", "URBANA", "BEIERSDORF",
-        "COLGATE", "CREST", "DERMEX", "EFILA", "FAPE", "GENOMA LAB", "GOOD BRANDS", "GSK",
-        "HERSIL", "INCASUR", "INTRADEVCO", "LEP", "MARUCHAN", "NINET", "NIVEA", "P&G", "PANASONIC",
-        "RECKITT", "NOEL", "TMLUC", "PARACAS", "PETALO", "SEDITA", "ALACENA", "ALIANZA", "AMARAS",
-        "AMOR", "ANGEL", "AVAL", "BLANCA FLOR", "BOLIVAR", "CAPRI", "CASINO", "COCINERO", "DENTO",
-        "DIA", "DON VITTORIO", "ESPIGA DE ORO", "GEOMEN", "JUMBO", "LA FAVORITA", "LAVAGGI",
-        "MARSELLA", "NICOLINI", "NORCHEFF", "OPAL", "PATITO", "PREMIO", "PRIMOR", "SAPOLIO",
-        "SAYON", "SELLO DE ORO", "TROME", "UMSHA", "VICTORIA", "MIMASKOT", "3 OSITOS", "COSTA",
-        "CAÑONAZO", "CAREZZA", "MOLITALIA", "MARCO POLO", "POMAROLA", "FANNY", "NUTRICAN",
-        "PASCUALINO", "TODINNO", "VIZZIO", "CARICIA", "MONCLER", "ÑA PANCHA", "DON MANOLO",
-        "FORTUNA", "MANPAN", "PALMEROLA", "POPEYE", "SPA", "TONDERO", "ACE", "ALWAYS", "ARIEL",
-        "AYUDIN", "CLEARBLUE", "DOWNY", "GILLETTE", "HEPABIONTA", "HERBAL ESSENCES", "H&S",
-        "OLD SPICE", "ORAL B", "PAMPERS", "PANTENE", "SECRET", "VICK", "BANDIDO", "CANBO",
-        "FRESHCAN", "MICHICAT", "REX", "RICOCAN", "RICOCAT", "RICOCRACK", "SUPERCAN", "SUPERCAT",
-        "THOR", "YAMIS DOG", "VUSE", "INKA KOLA", "CUSQUEÑA", "CRISTAL", "PILSEN CALLAO", "SUBLIME",
-        "DONOFRIO", "TRIANGULO", "MOROCHAS", "CHARADA", "PIQUEO SNAX", "LAY'S", "DORITOS", "CHEETOS", 
-        "CUATES", "CIELO", "PULP", "AJE", "VOLT", "SPORADE", "SABIDIA", "CUMANÁ", "WINTERS", "GN", 
-        "BOLTS", "CUA CUA",     "KIRKLAND", "MAGGI", "NESTLÉ", "NESCAFÉ", "MILO", "IDEAL", "LA LECHERA", "KIRITOS",
-        "COCA COLA", "FRUGOS", "SPRITE", "FANTA", "POWERADE", "AQUAFINA", "PEPSI", "SEVEN UP",
-        "GATORADE", "CONCORDIA", "GUARANA", "SAN CARLOS", "CORONA", "BRAHMA", "PILSEN TRUJILLO",
-        "AREQUIPEÑA", "PILSEN POLAR", "FREE TEA", "BIO AMARANTE", "KR", "ORO", "BIG COLA",
-        "CHITOS", "CHEESE TRIS", "TORTEES", "MANI MOTO", "KARINTO", "FRITO LAY",
-        "HUGGIES", "KOTEX", "SUAVE", "PLENIT", "SCOTT", "ELITE", "NOBLE", "BABYSEC",
-        "LADYSOFT", "POISE", "TENA", "REDOXON", "APRILIS", "UMSHA", "BAMBINO",
-        "ANITA", "COSTEÑO", "PAISANA", "VALLE NORTE", "HOJALMAR", "GRETEL", "CHINCHIN",
-        "GRANJA AZUL", "LA CALERA", "HUACARIZ", "VIGOR", "DANLAC", "TAYTA",
-        "TODINNO", "BAUDUCCO", "MOTTA", "BLANCA FLOR", "SAYON", "DORINA", "MANTEY",
-        "LA DANESA", "MANTY", "STEVIA", "SUCRALOSA", "GLADE", "POETT", "CLOROX",
-        "PINO", "ZORRITO", "PATITO", "SILJET", "RAID", "OFF", "CERINI", "VAPO"
-    ]
-
-    ft = token_set(fact_text)
-    mt = token_set(master_text)
+@lru_cache(maxsize=200_000)
+def _bonus_marca_cached(fact_text: str, master_text: str) -> float:
+    ft = _token_set_cached(fact_text)
+    mt = _token_set_cached(master_text)
 
     puntos = 0.0
-    for k in claves:
+    for k in BONUS_MARCA_CLAVES:
         if k in ft and k in mt:
             puntos += 0.04
 
     return min(puntos, 0.16)
 
 
-def score_heuristico(fila_factura: pd.Series, fila_maestro: pd.Series) -> float:
-    """
-    Heurística textual/familiar.
-    OJO: aquí NO dejamos que la presentación domine.
-    """
-    fact_base = str(fila_factura.get("Producto_base_norm", "") or "")
-    mast_base = str(fila_maestro.get("Producto_base_norm", "") or "")
+def bonus_marca(fact_text: str, master_text: str) -> float:
+    return _bonus_marca_cached(_to_text(fact_text), _to_text(master_text))
 
-    fact_limpio = str(fila_factura.get("Producto_limpio", fact_base) or fact_base)
-    mast_limpio = str(fila_maestro.get("Producto_limpio", mast_base) or mast_base)
+@lru_cache(maxsize=300_000)
+def _score_heuristico_cached(
+    fact_base: str,
+    mast_base: str,
+    fact_limpio: str,
+    mast_limpio: str,
+    unidad_fact: str,
+    unidad_mast: str,
+    costo_fact: float,
+    costo_mast: float,
+) -> float:
+    s_base_j = _jaccard_cached(fact_base, mast_base)
+    s_clean_j = _jaccard_cached(fact_limpio, mast_limpio)
+    s_seq = _sequence_ratio_cached(fact_base, mast_base)
 
-    s_base_j = jaccard(fact_base, mast_base)
-    s_clean_j = jaccard(fact_limpio, mast_limpio)
-    s_seq = SequenceMatcher(None, normalizar_texto(fact_base), normalizar_texto(mast_base)).ratio()
-
-    pfx_f = _primeros_tokens(fact_base, n=3)
-    pfx_m = _primeros_tokens(mast_base, n=3)
+    pfx_f = _primeros_tokens_cached(fact_base, 3)
+    pfx_m = _primeros_tokens_cached(mast_base, 3)
     same_prefix = 1.0 if pfx_f and pfx_m and pfx_f[:2] == pfx_m[:2] else 0.0
 
-    overlap = _overlap_tokens(fact_base, mast_base)
+    overlap = len(_token_set_cached(fact_base) & _token_set_cached(mast_base))
     overlap_score = min(overlap / 4.0, 1.0)
 
-    s_unidad = 1.0 if fila_factura["Unidad_norm"] == fila_maestro["Unidad_norm"] else 0.0
-    s_costo = similitud_log(fila_factura["Costo_log"], fila_maestro["Costo_log"], escala=2.2)
+    s_unidad = 1.0 if unidad_fact == unidad_mast else 0.0
+    s_costo = _similitud_log_cached(costo_fact, costo_mast, 2.2)
 
     score = (
         0.34 * s_base_j
@@ -255,9 +354,33 @@ def score_heuristico(fila_factura: pd.Series, fila_maestro: pd.Series) -> float:
         + 0.03 * s_costo
     )
 
-    score += bonus_marca(fact_base, mast_base)
+    score += _bonus_marca_cached(fact_base, mast_base)
     return float(min(max(score, 0.0), 1.0))
 
+
+def score_heuristico(fila_factura: pd.Series, fila_maestro: pd.Series) -> float:
+    fact_base = _to_text(fila_factura.get("Producto_base_norm", ""))
+    mast_base = _to_text(fila_maestro.get("Producto_base_norm", ""))
+
+    fact_limpio = _to_text(fila_factura.get("Producto_limpio", fact_base) or fact_base)
+    mast_limpio = _to_text(fila_maestro.get("Producto_limpio", mast_base) or mast_base)
+
+    unidad_fact = _to_text(fila_factura.get("Unidad_norm", ""))
+    unidad_mast = _to_text(fila_maestro.get("Unidad_norm", ""))
+
+    costo_fact = float(fila_factura.get("Costo_log", 0.0))
+    costo_mast = float(fila_maestro.get("Costo_log", 0.0))
+
+    return _score_heuristico_cached(
+        fact_base,
+        mast_base,
+        fact_limpio,
+        mast_limpio,
+        unidad_fact,
+        unidad_mast,
+        costo_fact,
+        costo_mast,
+    )
 
 def score_presentacion(fila_factura: pd.Series, fila_maestro: pd.Series) -> float:
     """
@@ -347,14 +470,16 @@ def recuperar_candidatos(
     top_n: int = 30,
     permitir_fallback_global: bool = True,
 ) -> pd.DataFrame:
-    candidatos = maestro[
-        maestro["RucProveedor"].map(_norm_ruc) == _norm_ruc(fila_factura["RucProveedor"])
-    ].copy()
+    maestro_por_ruc = _get_maestro_por_ruc(maestro)
+    ruc_factura = _norm_ruc(fila_factura["RucProveedor"])
 
+    candidatos = maestro_por_ruc.get(ruc_factura, pd.DataFrame()).copy()
+    candidatos.attrs = {}
     origen = "MISMO_PROVEEDOR"
 
     if candidatos.empty and permitir_fallback_global:
         candidatos = maestro.copy()
+        candidatos.attrs = {}
         origen = "GLOBAL"
 
     if candidatos.empty:
