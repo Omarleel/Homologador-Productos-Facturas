@@ -47,6 +47,9 @@ def inferir_codproducto(
                 "ContenidoFactura": f["ContenidoUnidad"],
                 "ContenidoTotalFactura": f["ContenidoTotal"],
                 "TipoContenidoFactura": f["TipoContenido"],
+                "Producto_norm_factura": f["Producto_norm"],
+                "Unidad_norm_factura": f["Unidad_norm"],
+                "Costo_log_factura": f["Costo_log"],
                 "Rank": 1,
             })
             resultados.append(row)
@@ -143,7 +146,7 @@ def inferir_codproducto(
 
         for rank, (_, c) in enumerate(cand.iterrows(), start=1):
             row = c.drop(
-                labels=["Producto_norm", "Unidad_norm", "Costo_log", "heuristica"],
+                labels=["heuristica"],
                 errors="ignore",
             ).to_dict()
 
@@ -158,6 +161,9 @@ def inferir_codproducto(
                 "ContenidoFactura": f["ContenidoUnidad"],
                 "ContenidoTotalFactura": f["ContenidoTotal"],
                 "TipoContenidoFactura": f["TipoContenido"],
+                "Producto_norm_factura": f["Producto_norm"],
+                "Unidad_norm_factura": f["Unidad_norm"],
+                "Costo_log_factura": f["Costo_log"],
                 "Rank": rank,
             })
 

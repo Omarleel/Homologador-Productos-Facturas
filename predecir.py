@@ -44,7 +44,7 @@ def main() -> None:
         facturas_nuevas=nuevas,
         maestro=maestro,
         modelo_match=modelo,
-        top_k=3,
+        top_k=5,
         umbral_match=modelo.best_threshold,
         top_n_candidatos=40,
     )
