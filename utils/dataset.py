@@ -108,16 +108,19 @@ def muestrear_negativos(
             continue
 
         pool = maestro_ruc[maestro_ruc["CodProducto"] != p.master_cod].copy()
-
         if pool.empty:
             continue
 
         fact_text = str(p.fact_text)
         fact_base_text = str(p.fact_base_text)
+        fact_unit = str(p.fact_unit)
+        fact_type = str(p.fact_type)
+
         fact_cost = float(p.fact_cost)
         fact_factor = float(p.fact_factor)
+        fact_content = float(p.fact_content)
         fact_total = float(p.fact_total)
-        fact_type = p.fact_type
+        fact_peso = float(p.fact_peso)
 
         pool["sim_text"] = pool["Producto_norm"].map(
             lambda x: cached_jaccard(fact_text, str(x))
@@ -126,49 +129,149 @@ def muestrear_negativos(
             lambda x: cached_jaccard(fact_base_text, str(x))
         )
         pool["sim_cost"] = pool["Costo_log"].map(
-            lambda x: cached_similitud_log(fact_cost, float(x), 1.8)
+            lambda x: cached_similitud_log(fact_cost, float(x), 1.4)
         )
         pool["sim_factor"] = pool["Factor_log"].map(
-            lambda x: cached_similitud_log(fact_factor, float(x), 2.4)
+            lambda x: cached_similitud_log(fact_factor, float(x), 2.8)
+        )
+        pool["sim_content"] = pool["ContenidoUnidad_log"].map(
+            lambda x: cached_similitud_log(fact_content, float(x), 2.8)
         )
         pool["sim_total"] = pool["ContenidoTotal_log"].map(
-            lambda x: cached_similitud_log(fact_total, float(x), 1.8)
+            lambda x: cached_similitud_log(fact_total, float(x), 2.2)
         )
-        pool["same_type"] = (pool["TipoContenido"] == fact_type).astype(float)
+        pool["sim_peso"] = pool["PesoUnitario"].map(
+            lambda x: cached_similitud_log(fact_peso, float(x), 2.0)
+        )
+
+        pool["same_type"] = (pool["TipoContenido"].astype(str) == fact_type).astype(float)
+        pool["same_unit"] = (pool["Unidad_norm"].astype(str) == fact_unit).astype(float)
+
+        pool["family_overlap"] = (
+            (pool["sim_base"] >= 0.45).astype(float)
+            + (pool["sim_text"] >= 0.35).astype(float)
+        ) / 2.0
+
+        pool["presentation_close"] = (
+            0.35 * pool["sim_factor"]
+            + 0.25 * pool["sim_content"]
+            + 0.25 * pool["sim_total"]
+            + 0.15 * pool["sim_peso"]
+        )
+
+        pool["same_presentation_band"] = (
+            (pool["presentation_close"] >= 0.82).astype(float)
+        )
+
+        pool["subtype_tension"] = np.clip(
+            pool["sim_base"] - pool["sim_text"],
+            0.0,
+            1.0,
+        )
 
         pool["hardness"] = (
-            0.35 * pool["sim_text"]
-            + 0.20 * pool["sim_base"]
-            + 0.15 * pool["sim_cost"]
-            + 0.10 * pool["sim_factor"]
-            + 0.20 * (pool["sim_total"] * pool["same_type"])
+            0.28 * pool["sim_text"]
+            + 0.22 * pool["sim_base"]
+            + 0.24 * pool["presentation_close"]
+            + 0.08 * pool["same_type"]
+            + 0.05 * pool["same_unit"]
+            + 0.05 * pool["sim_cost"]
+            + 0.08 * pool["subtype_tension"]
         )
 
-        top_hard = pool.nlargest(max(n_neg_por_pos * 4, 10), columns="hardness")
+        pool["hardness_subtipo"] = (
+            0.34 * pool["sim_base"]
+            + 0.28 * pool["presentation_close"]
+            + 0.12 * pool["same_type"]
+            + 0.08 * pool["same_unit"]
+            + 0.18 * pool["subtype_tension"]
+        )
 
-        n_hard = min(len(top_hard), max(1, int(round(n_neg_por_pos * 0.7))))
+        hermanos = pool[
+            (pool["sim_base"] >= 0.50)
+            & (pool["presentation_close"] >= 0.78)
+        ].copy()
+
+        if hermanos.empty:
+            hermanos = pool[
+                (pool["sim_base"] >= 0.40)
+                & (pool["presentation_close"] >= 0.70)
+            ].copy()
+
+        top_general_n = max(n_neg_por_pos * 6, 16)
+        top_subtipo_n = max(n_neg_por_pos * 4, 10)
+
+        top_general = pool.nlargest(top_general_n, columns="hardness")
+
+        if not hermanos.empty:
+            top_subtipo = hermanos.nlargest(top_subtipo_n, columns="hardness_subtipo")
+        else:
+            top_subtipo = pool.nlargest(top_subtipo_n, columns="hardness_subtipo")
+
+        top_hard = pd.concat([top_general, top_subtipo], ignore_index=True)
+        top_hard = top_hard.drop_duplicates(subset=["CodProducto"])
+
+        n_hard = min(len(top_hard), max(1, int(round(n_neg_por_pos * 0.8))))
         n_easy = max(0, n_neg_por_pos - n_hard)
 
         if len(top_hard) > n_hard:
-            hard_sel = top_hard.iloc[
-                rng.choice(len(top_hard), size=n_hard, replace=False)
-            ]
+            weights = top_hard["hardness_subtipo"].fillna(0.0).values.astype(np.float64)
+            weights = np.clip(weights, 1e-6, None)
+            weights = weights / weights.sum()
+
+            chosen_idx = rng.choice(
+                len(top_hard),
+                size=n_hard,
+                replace=False,
+                p=weights,
+            )
+            hard_sel = top_hard.iloc[chosen_idx]
         else:
             hard_sel = top_hard
 
-        used = set(hard_sel.index)
-        remaining = pool.loc[~pool.index.isin(used)]
+        used = set(hard_sel["CodProducto"].astype(str).tolist())
+
+        remaining = pool.loc[
+            ~pool["CodProducto"].astype(str).isin(used)
+        ].copy()
 
         if n_easy > 0 and not remaining.empty:
-            easy_sel = remaining.sample(
-                min(n_easy, len(remaining)),
-                random_state=SEED,
+            easy_pool = remaining.copy()
+
+            # Preferir algunos "semi-duros" antes que totalmente aleatorios
+            easy_pool["easy_weight"] = (
+                0.45 * easy_pool["sim_text"]
+                + 0.25 * easy_pool["sim_base"]
+                + 0.20 * easy_pool["presentation_close"]
+                + 0.10 * easy_pool["sim_cost"]
             )
+
+            easy_pool = easy_pool.nlargest(max(n_easy * 4, 8), columns="easy_weight")
+
+            if len(easy_pool) > n_easy:
+                easy_weights = easy_pool["easy_weight"].fillna(0.0).values.astype(np.float64)
+                easy_weights = np.clip(easy_weights, 1e-6, None)
+                easy_weights = easy_weights / easy_weights.sum()
+
+                easy_idx = rng.choice(
+                    len(easy_pool),
+                    size=n_easy,
+                    replace=False,
+                    p=easy_weights,
+                )
+                easy_sel = easy_pool.iloc[easy_idx]
+            else:
+                easy_sel = easy_pool
+
             seleccionados = pd.concat([hard_sel, easy_sel], ignore_index=True)
         else:
             seleccionados = hard_sel.reset_index(drop=True)
 
-        seleccionados = seleccionados.drop_duplicates(subset=["CodProducto"]).head(n_neg_por_pos)
+        seleccionados = (
+            seleccionados
+            .drop_duplicates(subset=["CodProducto"])
+            .head(n_neg_por_pos)
+        )
 
         for m in seleccionados.itertuples(index=False):
             negativos.append({
