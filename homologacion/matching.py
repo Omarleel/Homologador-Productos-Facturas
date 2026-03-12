@@ -72,55 +72,69 @@ def _sim_rel(a: float, b: float, escala: float = 6.0) -> float:
         return 0.5
     return float(math.exp(-escala * _rel_diff(a, b)))
 
-def _factor_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
-    ff = float(fila_factura.get("FactorConversion", 0.0) or 0.0)
-    fm = float(fila_maestro.get("FactorConversion", 0.0) or 0.0)
-
-    if ff <= 0.0 or fm <= 0.0:
-        return False
-
-    return _rel_diff(ff, fm) <= 0.02
+FAMILY_STOPWORDS = {
+    "UND", "UNIDAD", "UNIDADES", "CAJA", "CJA", "CJ", "PAQUETE", "PCK",
+    "PACK", "PQT", "PAQ", "PCK", "BOL", "BOLSA", "BOT", "BANDEJA",
+    "X", "BONIF", "CODIGO", "PRODUCTO", "PRODUCTOS",
+    "SB", "AD", "PE", "EX", "REG",
+}
 
 
-def _content_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
-    cf = float(fila_factura.get("ContenidoUnidad", 0.0) or 0.0)
-    cm = float(fila_maestro.get("ContenidoUnidad", 0.0) or 0.0)
-
-    if cf <= 0.0 or cm <= 0.0:
-        return False
-
-    return _rel_diff(cf, cm) <= 0.08
-
-
-def _total_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
-    tf = float(fila_factura.get("ContenidoTotal", 0.0) or 0.0)
-    tm = float(fila_maestro.get("ContenidoTotal", 0.0) or 0.0)
-
-    if tf <= 0.0 or tm <= 0.0:
-        return False
-
-    return _rel_diff(tf, tm) <= 0.08
+def _tokens_familia(texto: str) -> list[str]:
+    toks = [t for t in normalizar_texto(texto).split() if t]
+    salida = []
+    for t in toks:
+        if t in FAMILY_STOPWORDS:
+            continue
+        if t.isdigit():
+            continue
+        if len(t) <= 2:
+            continue
+        salida.append(t)
+    return salida
 
 
-def _peso_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
-    pf = float(fila_factura.get("PesoUnitario", 0.0) or 0.0)
-    pm = float(fila_maestro.get("PesoUnitario", 0.0) or 0.0)
+def _features_familia(fila_factura: pd.Series, fila_maestro: pd.Series) -> dict:
+    fact = str(fila_factura.get("Producto_base_norm", "") or "")
+    mast = str(fila_maestro.get("Producto_base_norm", "") or "")
 
-    if pf <= 0.0 or pm <= 0.0:
-        return False
+    tf = _tokens_familia(fact)
+    tm = _tokens_familia(mast)
 
-    return _rel_diff(pf, pm) <= 0.08
+    sf = set(tf)
+    sm = set(tm)
+    inter = sf & sm
+    union = sf | sm
+
+    overlap_count = len(inter)
+    family_jaccard = (len(inter) / max(len(union), 1)) if sf and sm else 0.0
+
+    same_anchor = 1.0 if tf and tm and tf[0] == tm[0] else 0.0
+    same_prefix2 = 1.0 if len(tf) >= 2 and len(tm) >= 2 and tf[:2] == tm[:2] else 0.0
+
+    return {
+        "family_overlap_count": overlap_count,
+        "family_jaccard": float(family_jaccard),
+        "same_anchor": float(same_anchor),
+        "same_prefix2": float(same_prefix2),
+    }
 
 
-def _tipo_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
-    tf = str(fila_factura.get("TipoContenido", "NONE"))
-    tm = str(fila_maestro.get("TipoContenido", "NONE"))
+def _same_family_strict(row: pd.Series) -> bool:
+    return bool(
+        row["same_prefix2"] == 1.0
+        or row["family_overlap_count"] >= 2
+        or (row["same_anchor"] == 1.0 and row["family_overlap_count"] >= 1)
+    )
 
-    if tf == "NONE" or tm == "NONE":
-        return True
 
-    return tf == tm
-
+def _same_family_soft(row: pd.Series) -> bool:
+    return bool(
+        _same_family_strict(row)
+        or (row["same_anchor"] == 1.0 and row["heuristica_texto"] >= 0.30)
+        or (row["family_overlap_count"] >= 1 and row["heuristica_texto"] >= 0.34)
+        or (row["heuristica_texto"] >= 0.72)
+    )
 
 def _primeros_tokens(texto: str, n: int = 3) -> Tuple[str, ...]:
     toks = [t for t in normalizar_texto(texto).split() if t]
@@ -295,13 +309,12 @@ def recuperar_candidatos(
     if candidatos.empty:
         return candidatos
 
-    # 1) Primero shortlist puramente textual/familiar
     candidatos["heuristica_texto"] = candidatos.apply(
         lambda r: score_heuristico(fila_factura, r),
         axis=1,
     )
 
-    shortlist_n = max(top_n * 8, 80)
+    shortlist_n = max(top_n * 12, 120)
     candidatos = (
         candidatos
         .sort_values("heuristica_texto", ascending=False)
@@ -309,12 +322,23 @@ def recuperar_candidatos(
         .copy()
     )
 
-    # Si hay suficientes candidatos claramente de la misma familia, descartamos ruido.
-    fuertes = candidatos[candidatos["heuristica_texto"] >= 0.28].copy()
-    if len(fuertes) >= max(top_n, 8):
-        candidatos = fuertes
+    fam = candidatos.apply(
+        lambda r: pd.Series(_features_familia(fila_factura, r)),
+        axis=1,
+    )
+    candidatos = pd.concat([candidatos.reset_index(drop=True), fam.reset_index(drop=True)], axis=1)
 
-    # 2) Dentro del shortlist textual, ya miramos presentación
+    candidatos["same_family_strict"] = candidatos.apply(_same_family_strict, axis=1)
+    candidatos["same_family_soft"] = candidatos.apply(_same_family_soft, axis=1)
+
+    fam_strict = candidatos[candidatos["same_family_strict"]].copy()
+    if len(fam_strict) >= max(top_n, 5):
+        candidatos = fam_strict
+    else:
+        fam_soft = candidatos[candidatos["same_family_soft"]].copy()
+        if len(fam_soft) >= max(top_n, 5):
+            candidatos = fam_soft
+
     candidatos["score_presentacion"] = candidatos.apply(
         lambda r: score_presentacion(fila_factura, r),
         axis=1,
@@ -325,7 +349,51 @@ def recuperar_candidatos(
         axis=1,
     )
 
-    # Gate léxico: si no es de la familia textual, la presentación no debe rescatarlo
+    candidatos["factor_match_strict"] = candidatos.apply(
+        lambda r: _factor_match_strict(fila_factura, r),
+        axis=1,
+    )
+
+    candidatos["content_match_strict"] = candidatos.apply(
+        lambda r: _content_match_strict(fila_factura, r),
+        axis=1,
+    )
+
+    candidatos["total_match_strict"] = candidatos.apply(
+        lambda r: _total_match_strict(fila_factura, r),
+        axis=1,
+    )
+
+    candidatos["peso_match_strict"] = candidatos.apply(
+        lambda r: _peso_match_strict(fila_factura, r),
+        axis=1,
+    )
+
+    candidatos["tipo_match_strict"] = candidatos.apply(
+        lambda r: _tipo_match_strict(fila_factura, r),
+        axis=1,
+    )
+
+    candidatos["presentacion_strict"] = (
+        candidatos["same_family_soft"]
+        & candidatos["tipo_match_strict"]
+        & candidatos["factor_match_strict"]
+        & (
+            candidatos["content_match_strict"]
+            | candidatos["total_match_strict"]
+            | candidatos["peso_match_strict"]
+        )
+    )
+
+    candidatos["presentacion_soft"] = (
+        candidatos["same_family_soft"]
+        & candidatos["tipo_match_strict"]
+        & (
+            candidatos["factor_match_strict"]
+            | (candidatos["tier_presentacion"] <= 1)
+        )
+    )
+
     candidatos["lexical_gate"] = np.clip(
         (candidatos["heuristica_texto"] - 0.12) / 0.35,
         0.0,
@@ -333,20 +401,84 @@ def recuperar_candidatos(
     )
 
     candidatos["score_pre_modelo"] = (
-        0.72 * candidatos["heuristica_texto"]
-        + 0.28 * candidatos["score_presentacion"]
+        0.78 * candidatos["heuristica_texto"]
+        + 0.22 * candidatos["score_presentacion"]
     ) * (0.20 + 0.80 * candidatos["lexical_gate"])
 
     candidatos["OrigenCandidato"] = origen
 
+    estrictos = candidatos[candidatos["presentacion_strict"]].copy()
+    if len(estrictos) >= top_n:
+        candidatos = estrictos
+    else:
+        suaves = candidatos[candidatos["presentacion_soft"]].copy()
+        if len(suaves) >= top_n:
+            candidatos = suaves
+
     candidatos = (
         candidatos
         .sort_values(
-            ["heuristica_texto", "tier_presentacion", "score_pre_modelo"],
-            ascending=[False, True, False],
+            [
+                "same_family_strict",
+                "same_family_soft",
+                "tier_presentacion",
+                "presentacion_strict",
+                "score_pre_modelo",
+                "heuristica_texto",
+            ],
+            ascending=[False, False, True, False, False, False],
         )
         .head(top_n)
         .reset_index(drop=True)
     )
 
     return candidatos
+
+def _factor_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
+    ff = float(fila_factura.get("FactorConversion", 0.0) or 0.0)
+    fm = float(fila_maestro.get("FactorConversion", 0.0) or 0.0)
+
+    if ff <= 0.0 or fm <= 0.0:
+        return False
+
+    return _rel_diff(ff, fm) <= 0.02
+
+
+def _content_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
+    cf = float(fila_factura.get("ContenidoUnidad", 0.0) or 0.0)
+    cm = float(fila_maestro.get("ContenidoUnidad", 0.0) or 0.0)
+
+    if cf <= 0.0 or cm <= 0.0:
+        return False
+
+    return _rel_diff(cf, cm) <= 0.08
+
+
+def _total_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
+    tf = float(fila_factura.get("ContenidoTotal", 0.0) or 0.0)
+    tm = float(fila_maestro.get("ContenidoTotal", 0.0) or 0.0)
+
+    if tf <= 0.0 or tm <= 0.0:
+        return False
+
+    return _rel_diff(tf, tm) <= 0.08
+
+
+def _peso_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
+    pf = float(fila_factura.get("PesoUnitario", 0.0) or 0.0)
+    pm = float(fila_maestro.get("PesoUnitario", 0.0) or 0.0)
+
+    if pf <= 0.0 or pm <= 0.0:
+        return False
+
+    return _rel_diff(pf, pm) <= 0.08
+
+
+def _tipo_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool:
+    tf = str(fila_factura.get("TipoContenido", "NONE"))
+    tm = str(fila_maestro.get("TipoContenido", "NONE"))
+
+    if tf == "NONE" or tm == "NONE":
+        return True
+
+    return tf == tm

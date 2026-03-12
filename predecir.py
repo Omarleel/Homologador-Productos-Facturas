@@ -26,7 +26,7 @@ def main() -> None:
         top_n_candidatos=40,
     )
 
-    resultado.to_csv("resultado_inferencia.csv", index=False, encoding="utf-8-sig")
+    resultado.to_csv("resultado_inferencia.csv", sep=';', index=False, encoding="utf-8-sig")
     print(resultado.head(20))
 
 

@@ -100,23 +100,39 @@ def inferir_codproducto(
 
         col_heur = "heuristica_texto" if "heuristica_texto" in cand.columns else "heuristica"
 
-        # Gate léxico: si el texto/familia no se parece, no dejamos que la presentación lo suba.
         cand["LexicalGate"] = np.clip(
             (cand[col_heur] - 0.12) / 0.35,
             0.0,
             1.0,
         )
 
-        # La presentación ya no domina; solo ayuda a desempatar dentro de la misma familia.
         cand["ScoreFinal"] = (
             0.68 * cand["ScoreModelo"]
             + 0.22 * cand[col_heur]
             + 0.10 * cand["score_presentacion"]
         ) * (0.25 + 0.75 * cand["LexicalGate"])
 
+        if "same_family_strict" in cand.columns:
+            fam_strict = cand[cand["same_family_strict"] == True].copy()
+            if len(fam_strict) >= top_k:
+                cand = fam_strict
+            else:
+                fam_soft = cand[cand["same_family_soft"] == True].copy()
+                if len(fam_soft) >= top_k:
+                    cand = fam_soft
+
+        if "presentacion_strict" in cand.columns:
+            strict_top = cand[cand["presentacion_strict"] == True].copy()
+            if len(strict_top) >= top_k:
+                cand = strict_top
+            else:
+                soft_top = cand[cand["presentacion_soft"] == True].copy()
+                if len(soft_top) >= top_k:
+                    cand = soft_top
+
         cand = cand.sort_values(
-            ["ScoreFinal", "ScoreModelo", col_heur, "tier_presentacion"],
-            ascending=[False, False, False, True],
+            ["same_family_strict", "same_family_soft", "ScoreFinal", "ScoreModelo", col_heur, "tier_presentacion"],
+            ascending=[False, False, False, False, False, True],
         ).head(top_k)
 
         cand["Score"] = cand["ScoreFinal"]
