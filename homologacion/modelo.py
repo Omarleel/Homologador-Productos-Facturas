@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 import pandas as pd
@@ -9,10 +9,15 @@ from sklearn.model_selection import train_test_split
 
 
 class ModeloMatchCodProducto:
-    def __init__(self, max_tokens: int = 6000, emb_dim: int = 48):
+    def __init__(
+        self, 
+        max_tokens: int = 10000,
+        text_embedding_dim: int = 16,  # Reducido de 48/24 a 16
+        ):
         self.max_tokens = max_tokens
-        self.emb_dim = emb_dim
-
+        self.text_embedding_dim = text_embedding_dim
+        self.cost_normalizer = None
+        self.peso_normalizer = None
         self.text_vec = tf.keras.layers.TextVectorization(
             max_tokens=max_tokens,
             output_mode="tf_idf",
@@ -35,8 +40,9 @@ class ModeloMatchCodProducto:
         if self.model is None:
             raise RuntimeError("No hay modelo para guardar.")
 
-        # 1) Guardar pesos de la red neuronal
-        self.model.save_weights(f"{carpeta_modelo}/pesos_modelo.weights.h5")
+        # 1) Guardar pesos en formato nativo de TensorFlow (.weights.tf)
+        # Esto soluciona el NotImplementedError con StringLookup y TextVectorization
+        self.model.save_weights(f"{carpeta_modelo}/pesos_modelo.weights.tf")
 
         # 2) Guardar vocabulario de TextVectorization
         vocab_text = self.text_vec.get_vocabulary()
@@ -66,13 +72,13 @@ class ModeloMatchCodProducto:
         # 5) Guardar metadatos
         meta = {
             "max_tokens": self.max_tokens,
-            "emb_dim": self.emb_dim,
+            "text_embedding_dim": self.text_embedding_dim,
             "best_threshold": self.best_threshold,
         }
         with open(f"{carpeta_modelo}/meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        print(f"Pesos (incluyendo TF-IDF y vocabularios) guardados en: {carpeta_modelo}")
+        print(f"Modelo y activos guardados exitosamente en: {carpeta_modelo}")
 
     @classmethod
     def cargar(cls, carpeta_modelo: str):
@@ -81,44 +87,35 @@ class ModeloMatchCodProducto:
 
         instancia = cls(
             max_tokens=meta["max_tokens"],
-            emb_dim=meta["emb_dim"],
+            text_embedding_dim=meta["text_embedding_dim"],
         )
 
         # 1) Restaurar vocabulario de TextVectorization
         with open(f"{carpeta_modelo}/text_vocabulary.json", "r", encoding="utf-8") as f:
             vocab_text = json.load(f)
 
-        text_idf = np.load(
-            f"{carpeta_modelo}/text_idf_weights.npy",
-            allow_pickle=True
-        )
-
-        # Asegurar que idf_weights tenga la longitud adecuada
+        text_idf = np.load(f"{carpeta_modelo}/text_idf_weights.npy", allow_pickle=True)
         if len(text_idf) == 0:
-            # Si no hay pesos (por ejemplo, archivo vacío), crear unos (IDF por defecto)
             text_idf = np.ones(len(vocab_text), dtype=np.float32)
 
         try:
             instancia.text_vec.set_vocabulary(vocab_text, idf_weights=text_idf.tolist())
         except Exception:
-            # Fallback: quitar el primer token (reservado) si la versión de Keras lo exige
             instancia.text_vec.set_vocabulary(vocab_text[1:], idf_weights=text_idf[1:].tolist())
 
         # 2) Restaurar vocabulario de StringLookup
         with open(f"{carpeta_modelo}/unit_vocabulary.json", "r", encoding="utf-8") as f:
             vocab_unit = json.load(f)
-
         try:
             instancia.unit_lookup.set_vocabulary(vocab_unit)
         except Exception:
-            # Algunas versiones esperan vocabulario sin token especial
             instancia.unit_lookup.set_vocabulary(vocab_unit[1:])
 
-        # 3) Construir el modelo ya con preprocessors restaurados
+        # 3) Construir arquitectura
         instancia.construir()
 
-        # 4) Cargar pesos de la red
-        instancia.model.load_weights(f"{carpeta_modelo}/pesos_modelo.weights.h5")
+        # 4) Cargar pesos (usando el nuevo formato .tf)
+        instancia.model.load_weights(f"{carpeta_modelo}/pesos_modelo.weights.tf")
         instancia.best_threshold = meta["best_threshold"]
 
         return instancia
@@ -142,82 +139,94 @@ class ModeloMatchCodProducto:
         x = self.text_vec(inp)
         x = tf.keras.layers.Dense(128, activation="relu")(x)
         x = tf.keras.layers.Dropout(0.20)(x)
-        x = tf.keras.layers.Dense(self.emb_dim, activation="relu")(x)
+        x = tf.keras.layers.Dense(self.text_embedding_dim, activation="relu")(x)
         return tf.keras.Model(inp, x, name="text_encoder")
 
     def construir(self) -> tf.keras.Model:
+        # --- Entradas ---
         fact_text = tf.keras.Input(shape=(1,), dtype=tf.string, name="fact_text")
         master_text = tf.keras.Input(shape=(1,), dtype=tf.string, name="master_text")
         fact_unit = tf.keras.Input(shape=(1,), dtype=tf.string, name="fact_unit")
         master_unit = tf.keras.Input(shape=(1,), dtype=tf.string, name="master_unit")
         fact_cost = tf.keras.Input(shape=(1,), dtype=tf.float32, name="fact_cost")
         master_cost = tf.keras.Input(shape=(1,), dtype=tf.float32, name="master_cost")
+        fact_peso = tf.keras.Input(shape=(1,), dtype=tf.float32, name="fact_peso")
+        master_peso = tf.keras.Input(shape=(1,), dtype=tf.float32, name="master_peso")
 
+        # --- Normalización de Números ---
+        self.peso_normalizer = tf.keras.layers.Normalization(axis=-1, name="peso_normalizer")
+        fact_peso_norm = self.peso_normalizer(fact_peso)
+        master_peso_norm = self.peso_normalizer(master_peso)
+
+        self.cost_normalizer = tf.keras.layers.Normalization(axis=-1, name="cost_normalizer")
+        fact_cost_norm = self.cost_normalizer(fact_cost)
+        master_cost_norm = self.cost_normalizer(master_cost)
+
+        # --- Similitudes Numéricas ---
+        cost_ratio = tf.keras.layers.Lambda(lambda x: x[0] / (x[1] + 1e-6), name="cost_ratio")([fact_cost_norm, master_cost_norm])
+        cost_sim = tf.keras.layers.Lambda(lambda x: tf.exp(-tf.abs(x[0] - x[1])), name="cost_sim")([fact_cost_norm, master_cost_norm])
+        peso_sim = tf.keras.layers.Lambda(lambda x: tf.exp(-tf.abs(x[0] - x[1])), name="peso_sim")([fact_peso_norm, master_peso_norm])
+
+        # --- Codificación de Texto ---
         text_encoder = self._text_encoder()
-
         fact_text_vec = text_encoder(fact_text)
         master_text_vec = text_encoder(master_text)
 
-        diff_text = tf.keras.layers.Lambda(
-            lambda x: tf.abs(x[0] - x[1])
-        )([fact_text_vec, master_text_vec])
+        diff_text = tf.keras.layers.Lambda(lambda x: tf.abs(x[0] - x[1]), name="diff_text")([fact_text_vec, master_text_vec])
+        text_cos = tf.keras.layers.Dot(axes=1, normalize=True, name="text_cos")([fact_text_vec, master_text_vec])
 
-        text_cos = tf.keras.layers.Dot(axes=1, normalize=True)(
-            [fact_text_vec, master_text_vec]
-        )
-
+        # --- Unidad ---
         fact_unit_idx = self.unit_lookup(fact_unit)
         master_unit_idx = self.unit_lookup(master_unit)
+        unit_match = tf.keras.layers.Lambda(lambda x: tf.cast(tf.equal(x[0], x[1]), tf.float32), name="unit_match")([fact_unit_idx, master_unit_idx])
 
-        unit_match = tf.keras.layers.Lambda(
-            lambda x: tf.cast(tf.equal(x[0], x[1]), tf.float32)
-        )([fact_unit_idx, master_unit_idx])
-
-        cost_diff = tf.keras.layers.Lambda(
-            lambda x: tf.abs(x[0] - x[1])
-        )([fact_cost, master_cost])
-
-        cost_sim = tf.keras.layers.Lambda(
-            lambda x: tf.exp(-x)
-        )(cost_diff)
-
+        # --- Concatenación de Características ---
         x = tf.keras.layers.Concatenate()([
-            fact_text_vec,
-            master_text_vec,
-            diff_text,
-            text_cos,
-            unit_match,
-            fact_cost,
-            master_cost,
-            cost_diff,
-            cost_sim,
+            fact_text_vec, master_text_vec, diff_text, text_cos,
+            unit_match, fact_cost_norm, master_cost_norm, cost_sim, peso_sim
         ])
 
-        x = tf.keras.layers.Dense(128, activation="relu")(x)
-        x = tf.keras.layers.Dropout(0.25)(x)
-        x = tf.keras.layers.Dense(64, activation="relu")(x)
-        x = tf.keras.layers.Dropout(0.15)(x)
-        y = tf.keras.layers.Dense(1, activation="sigmoid", name="match_prob")(x)
+        # --- Capas Densas ---
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+        x = tf.keras.layers.Dropout(0.2)(x)
+        x = tf.keras.layers.Dense(64, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+        
+        # Pre-probabilidad (Opinión del modelo)
+        logits_match = tf.keras.layers.Dense(1, activation="sigmoid", name="pre_prob")(x)
 
+        # --- COMPUERTAS DE SEGURIDAD (GATES) ---
+        # Penaliza si el costo es muy diferente
+        cost_gate = tf.keras.layers.Lambda(
+            lambda x: tf.exp(-7.0 * tf.square(x - 1.0)), name="cost_gate"
+        )(cost_ratio)
+
+        # Penaliza si el peso es muy diferente
+        peso_gate = tf.keras.layers.Lambda(
+            lambda x: tf.exp(-7.0 * tf.square(x[0] - x[1])), name="peso_gate"
+        )([fact_peso_norm, master_peso_norm])
+
+        # Multiplicación final: Si los números fallan, el score baja a 0
+        confianza_total = tf.keras.layers.Multiply(name="total_gate")([logits_match, cost_gate, peso_gate])
+        y = tf.keras.layers.Activation("linear", name="match_prob")(confianza_total)
+
+        # --- Definición y Compilación ---
         model = tf.keras.Model(
-            inputs=[fact_text, master_text, fact_unit, master_unit, fact_cost, master_cost],
+            inputs=[fact_text, master_text, fact_unit, master_unit, fact_cost, master_cost, fact_peso, master_peso],
             outputs=y,
         )
 
         model.compile(
             optimizer=tf.keras.optimizers.Adam(1e-3),
             loss="binary_crossentropy",
-            metrics=[
-                tf.keras.metrics.AUC(name="auc"),
-                tf.keras.metrics.BinaryAccuracy(name="acc"),
-            ],
+            metrics=[tf.keras.metrics.AUC(name="auc"), tf.keras.metrics.BinaryAccuracy(name="acc")],
         )
 
-        self.model = model
+        self.model = model  # <--- CRITICO: Aquí se asigna el modelo para que no sea None
         return model
-
+    
     @staticmethod
-    def _to_ds(df: pd.DataFrame, batch_size: int = 256, shuffle: bool = False) -> tf.data.Dataset:
+    def _to_ds(df: pd.DataFrame, sample_weight: Optional[np.ndarray] = None, batch_size: int = 256, shuffle: bool = False) -> tf.data.Dataset:
         x = {
             "fact_text": df["fact_text"].astype(str).values.reshape(-1, 1),
             "master_text": df["master_text"].astype(str).values.reshape(-1, 1),
@@ -225,11 +234,16 @@ class ModeloMatchCodProducto:
             "master_unit": df["master_unit"].astype(str).values.reshape(-1, 1),
             "fact_cost": df["fact_cost"].astype(np.float32).values.reshape(-1, 1),
             "master_cost": df["master_cost"].astype(np.float32).values.reshape(-1, 1),
+            "fact_peso": df["fact_peso"].astype(np.float32).values.reshape(-1, 1),
+            "master_peso": df["master_peso"].astype(np.float32).values.reshape(-1, 1),
         }
-
         y = df["label"].astype(np.float32).values
 
-        ds = tf.data.Dataset.from_tensor_slices((x, y))
+        if sample_weight is not None:
+            ds = tf.data.Dataset.from_tensor_slices((x, y, sample_weight))
+        else:
+            ds = tf.data.Dataset.from_tensor_slices((x, y))
+
         if shuffle:
             ds = ds.shuffle(min(len(df), 10000), seed=42)
 
@@ -241,14 +255,37 @@ class ModeloMatchCodProducto:
         if self.model is None:
             self.construir()
 
-        train_df, valid_df = train_test_split(
-            pares,
-            test_size=0.2,
-            random_state=42,
-            stratify=pares["label"],
-        )
+        # Adaptar normalizador de costos
+        all_costs = np.concatenate([pares["fact_cost"].values, pares["master_cost"].values]).reshape(-1, 1)
+        self.cost_normalizer.adapt(all_costs)
+        
+        all_pesos = np.concatenate([pares["fact_peso"].values, pares["master_peso"].values]).reshape(-1, 1)
+        self.peso_normalizer.adapt(all_pesos)
 
-        ds_train = self._to_ds(train_df, batch_size=batch_size, shuffle=True)
+        # Dividir en entrenamiento y validación
+        train_df, valid_df = train_test_split(pares, test_size=0.2, random_state=42, stratify=pares["label"])
+
+        # Calcular sample weights para entrenamiento
+        train_df = train_df.copy()
+    
+        cost_diff = np.abs(train_df["fact_cost"] - train_df["master_cost"]).values
+        peso_diff = np.abs(train_df["fact_peso"] - train_df["master_peso"]).values
+
+        max_cost_diff = cost_diff.max() if cost_diff.max() > 0 else 1.0
+        max_peso_diff = peso_diff.max() if peso_diff.max() > 0 else 1.0
+
+        cost_diff_norm = cost_diff / max_cost_diff
+        peso_diff_norm = peso_diff / max_peso_diff
+
+        combined_diff = np.maximum(cost_diff_norm, peso_diff_norm)   # énfasis en la mayor discrepancia
+
+        sample_weight = np.ones(len(train_df))
+        neg_mask = train_df["label"] == 0
+        factor = 10.0
+        sample_weight[neg_mask] = 1.0 + factor * combined_diff[neg_mask]
+
+        # Crear datasets
+        ds_train = self._to_ds(train_df, sample_weight=sample_weight, batch_size=batch_size, shuffle=True)
         ds_valid = self._to_ds(valid_df, batch_size=batch_size, shuffle=False)
 
         n_pos = max(int((train_df["label"] == 1).sum()), 1)
@@ -276,6 +313,7 @@ class ModeloMatchCodProducto:
             verbose=1,
         )
 
+        # Calcular umbral óptimo en validación
         y_valid = valid_df["label"].astype(int).values
         p_valid = self.model.predict(ds_valid, verbose=0).reshape(-1)
 

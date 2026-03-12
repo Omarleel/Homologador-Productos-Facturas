@@ -3,9 +3,9 @@ import pandas as pd
 from homologacion import (
     init_seeds,
     construir_dataset_entrenamiento,
-    ModeloMatchCodProducto,
 )
 
+from homologacion.modelo import ModeloMatchCodProducto
 
 def main() -> None:
     init_seeds()
@@ -27,13 +27,13 @@ def main() -> None:
 
     modelo = ModeloMatchCodProducto(
         max_tokens=6000,
-        emb_dim=48,
+        text_embedding_dim=24,
     )
 
     modelo.fit(
         pares=pares,
-        epochs=6,
-        batch_size=256,
+        epochs=12,
+        batch_size=128,
     )
 
     modelo.guardar("modelo_homologacion_v1")

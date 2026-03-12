@@ -65,9 +65,11 @@ def inferir_codproducto(
             "fact_text": [f["Producto_norm"]] * len(cand),
             "fact_unit": [f["Unidad_norm"]] * len(cand),
             "fact_cost": [f["Costo_log"]] * len(cand),
+            "fact_peso": [f["PesoUnitario"]] * len(cand),
             "master_text": cand["Producto_norm"].values,
             "master_unit": cand["Unidad_norm"].values,
             "master_cost": cand["Costo_log"].values,
+            "master_peso": cand["PesoUnitario"].values,
             "label": [0] * len(cand),
         })
 

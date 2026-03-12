@@ -33,6 +33,7 @@ facturas_nuevas.csv
 resultado_inferencia.csv
 *.xlsx
 *.xls
+*.csv
 
 # === Logs y Configuración de Sistema ===
 *.log

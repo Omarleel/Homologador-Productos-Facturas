@@ -7,6 +7,7 @@ from .limpieza import (
     normalizar_texto,
     normalizar_unidad,
     log_seguro,
+    extraer_peso_desde_texto
 )
 
 
@@ -60,6 +61,9 @@ def preparar_maestro(maestro: pd.DataFrame) -> pd.DataFrame:
         df["CostoCaja"] = 0.0
 
     df["Producto_norm"] = df["Producto"].fillna("").astype(str).map(normalizar_texto)
+    if "PesoUnitario" not in df.columns:
+        df["PesoUnitario"] = 0.0
+    df["PesoUnitario"] = pd.to_numeric(df["PesoUnitario"], errors="coerce").fillna(0.0)
     df["Unidad_norm"] = df["UnidaMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["Costo_log"] = df["CostoCaja"].map(log_seguro)
@@ -88,6 +92,11 @@ def preparar_facturas(facturas: pd.DataFrame) -> pd.DataFrame:
     )
 
     df["Producto_norm"] = df["Producto"].fillna("").astype(str).map(normalizar_texto)
+    if "PesoUnitario" not in df.columns:
+        # Opcional: intentar extraer del texto
+        df["PesoUnitario"] = df["Producto"].apply(extraer_peso_desde_texto)
+    else:
+        df["PesoUnitario"] = pd.to_numeric(df["PesoUnitario"], errors="coerce").fillna(0.0)
     df["Unidad_norm"] = df["UnidaMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["Costo_log"] = df["CostoCaja"].map(log_seguro)

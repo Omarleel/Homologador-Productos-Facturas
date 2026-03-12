@@ -3,9 +3,8 @@ import pandas as pd
 from homologacion import (
     init_seeds,
     inferir_codproducto,
-    ModeloMatchCodProducto,
 )
-
+from homologacion.modelo import ModeloMatchCodProducto
 
 def main() -> None:
     init_seeds()
@@ -24,7 +23,7 @@ def main() -> None:
         modelo_match=modelo,
         top_k=3,
         umbral_match=modelo.best_threshold,
-        top_n_candidatos=30,
+        top_n_candidatos=50,
     )
 
     resultado.to_csv("resultado_inferencia.csv", index=False, encoding="utf-8-sig")

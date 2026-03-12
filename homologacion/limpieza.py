@@ -80,6 +80,23 @@ def normalizar_unidad(u: str) -> str:
     }
     return mapa.get(u, u)
 
+def extraer_peso_desde_texto(texto: str) -> float:
+    """
+    Extrae el peso en gramos buscando un número seguido de 'GR' o 'G'.
+    Retorna el peso en kg (dividiendo entre 1000) o 0 si no encuentra.
+    """
+    if pd.isna(texto):
+        return 0.0
+    texto = str(texto).upper()
+    # Busca patrón como 190GR, 190 G, 190G, etc.
+    match = re.search(r'(\d+)\s*(?:GR|G)', texto)
+    if match:
+        return float(match.group(1)) / 1000.0  # convertir a kg
+    # Si no, buscar cualquier número (como fallback)
+    match = re.search(r'(\d+)', texto)
+    if match:
+        return float(match.group(1)) / 1000.0
+    return 0.0
 
 def log_seguro(x: float) -> float:
     x = 0.0 if pd.isna(x) else float(x)

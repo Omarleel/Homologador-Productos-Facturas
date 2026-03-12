@@ -52,10 +52,25 @@ def jaccard(a: str, b: str) -> float:
 
 
 def bonus_marca(fact_text: str, master_text: str) -> float:
-    claves = [
+    claves = claves = [
+        # P&G / Cuidado Personal
         "PANTENE", "HEAD", "SHOULDERS", "DOWNY", "ARIEL", "GILLETTE",
         "OLD", "SPICE", "SECRET", "ORAL", "B", "VICK", "PAMPERS",
-        "VENUS", "ACE", "PRINCESS", "SPIDERMAN",
+        "VENUS", "ACE", "PROTEX", "COLGATE", "KOLYNOS", "NINET",
+        
+        # Alicorp / Limpieza y Alimentos
+        "BOLIVAR", "OPAL", "MARSELLA", "PRIMOR", "ALICORP", "TONDERO", 
+        "PALMEROLA", "FORTUNA", "POPEYE", "DON", "VITTORIO", "SAYON",
+        
+        # Gloria / Lácteos
+        "GLORIA", "BONLE", "YOFRESH", "PURA", "VIDA",
+        
+        # Nestlé / Otros
+        "NESTLE", "MAGGI", "KIRMA", "NESCAFE", "MILO", "SUBLIME",
+        
+        # Marcas Locales / Frecuentes en tu dataset
+        "FANNY", "POMAROLA", "OSITOS", "ANGEL", "CHOCK", "RICOCAN",
+        "THOMAS", "TOTTUS", "GLINA", "CHIN", "GRANUTS", "SCORE", "FOUR", "LOKO"
     ]
 
     ft = token_set(fact_text)
@@ -73,26 +88,20 @@ def score_heuristico(fila_factura: pd.Series, fila_maestro: pd.Series) -> float:
     s_texto = jaccard(fila_factura["Producto_norm"], fila_maestro["Producto_norm"])
     s_unidad = 1.0 if fila_factura["Unidad_norm"] == fila_maestro["Unidad_norm"] else 0.0
 
+    # Similitud de Costo
     diff_costo = abs(fila_factura["Costo_log"] - fila_maestro["Costo_log"])
     s_costo = float(np.exp(-2.0 * diff_costo))
+    
+    # NUEVO: Similitud de Peso (Extraído del texto o columna)
+    # Si la factura dice 190g y el maestro 170g, la diferencia es pequeña (0.02kg)
+    p_fact = fila_factura.get("PesoUnitario", 0)
+    p_maes = fila_maestro.get("PesoUnitario", 0)
+    diff_peso = abs(p_fact - p_maes)
+    s_peso = float(np.exp(-5.0 * diff_peso)) # Penaliza fuerte diferencias grandes
 
-    cod_fact = fila_factura["CodProducto"]
-    score_cod = 0.0
-
-    for c in ["CodProducto", "CodProducto2", "CodProducto3"]:
-        cod_m = fila_maestro.get(c, "")
-        if cod_fact and cod_m:
-            if cod_fact[-6:] == cod_m[-6:]:
-                score_cod = max(score_cod, 0.30)
-            elif cod_fact[-5:] == cod_m[-5:]:
-                score_cod = max(score_cod, 0.20)
-            elif cod_fact[-4:] == cod_m[-4:]:
-                score_cod = max(score_cod, 0.10)
-
-    score = 0.55 * s_texto + 0.20 * s_unidad + 0.20 * s_costo + 0.05 * score_cod
+    score = (0.40 * s_texto) + (0.15 * s_unidad) + (0.30 * s_costo) + (0.15 * s_peso)
     score += bonus_marca(fila_factura["Producto_norm"], fila_maestro["Producto_norm"])
     return float(score)
-
 
 def recuperar_candidatos(
     fila_factura: pd.Series,
