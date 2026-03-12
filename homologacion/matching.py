@@ -1,21 +1,50 @@
 import math
 from difflib import SequenceMatcher
 from typing import Dict, Optional, Tuple
-
+import re
 import numpy as np
 import pandas as pd
 
 from .limpieza import normalizar_codigo, normalizar_texto
+
+def _norm_ruc(x) -> str:
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+def _norm_cod(x) -> str:
+    if pd.isna(x):
+        return ""
+
+    if isinstance(x, (int, np.integer)):
+        return normalizar_codigo(str(int(x)))
+
+    if isinstance(x, (float, np.floating)):
+        if float(x).is_integer():
+            return normalizar_codigo(str(int(x)))
+        return normalizar_codigo(str(x).strip())
+
+    s = str(x).strip()
+
+    # Solo quita .0 si el valor completo es numérico tipo 12345.0 o 12345.00
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+
+    return normalizar_codigo(s)
 
 
 def construir_indice_codigos(maestro: pd.DataFrame) -> Dict[Tuple[str, str], int]:
     indice: Dict[Tuple[str, str], int] = {}
 
     for idx, row in maestro.iterrows():
-        ruc = str(row["RucProveedor"]).strip()
+        ruc = _norm_ruc(row["RucProveedor"])
 
         for c in ["CodProducto", "CodProducto2", "CodProducto3"]:
-            codigo = row.get(c, "")
+            codigo = _norm_cod(row.get(c, ""))
+
             if codigo:
                 indice[(ruc, codigo)] = idx
 
@@ -28,11 +57,11 @@ def buscar_match_exacto(
     indice_codigos: Dict[Tuple[str, str], int],
 ) -> Optional[pd.Series]:
     key = (
-        str(fila_factura["RucProveedor"]).strip(),
-        normalizar_codigo(fila_factura["CodProducto"]),
+        _norm_ruc(fila_factura["RucProveedor"]),
+        _norm_cod(fila_factura["CodProducto"]),
     )
-    idx = indice_codigos.get(key)
 
+    idx = indice_codigos.get(key)
     if idx is None:
         return None
 
@@ -124,16 +153,13 @@ def _same_family_strict(row: pd.Series) -> bool:
     return bool(
         row["same_prefix2"] == 1.0
         or row["family_overlap_count"] >= 2
-        or (row["same_anchor"] == 1.0 and row["family_overlap_count"] >= 1)
     )
-
 
 def _same_family_soft(row: pd.Series) -> bool:
     return bool(
-        _same_family_strict(row)
-        or (row["same_anchor"] == 1.0 and row["heuristica_texto"] >= 0.30)
-        or (row["family_overlap_count"] >= 1 and row["heuristica_texto"] >= 0.34)
-        or (row["heuristica_texto"] >= 0.72)
+        row["same_prefix2"] == 1.0
+        or row["family_overlap_count"] >= 1
+        or row["heuristica_texto"] >= 0.55
     )
 
 def _primeros_tokens(texto: str, n: int = 3) -> Tuple[str, ...]:
@@ -322,7 +348,7 @@ def recuperar_candidatos(
     permitir_fallback_global: bool = True,
 ) -> pd.DataFrame:
     candidatos = maestro[
-        maestro["RucProveedor"].astype(str) == str(fila_factura["RucProveedor"])
+        maestro["RucProveedor"].map(_norm_ruc) == _norm_ruc(fila_factura["RucProveedor"])
     ].copy()
 
     origen = "MISMO_PROVEEDOR"

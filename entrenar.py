@@ -31,7 +31,7 @@ def main() -> None:
 
     modelo.fit(
         pares=pares,
-        epochs=10,
+        epochs=16,
         batch_size=256,
     )
 

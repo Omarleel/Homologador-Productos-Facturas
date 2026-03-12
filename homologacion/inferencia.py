@@ -29,6 +29,7 @@ def inferir_codproducto(
     resultados = []
 
     for _, f in fact_p.iterrows():
+        
         exacto = buscar_match_exacto(f, maestro_p, idx)
 
         if exacto is not None:
