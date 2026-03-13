@@ -6,10 +6,12 @@ from .matching import (
     buscar_match_exacto,
     construir_indice_codigos,
     recuperar_candidatos,
+    calc_same_brand,
+    calc_brand_conflict
+    
 )
 from core.model import ModeloMatchProducto
 from .preparacion import preparar_facturas, preparar_maestro
-
 
 def inferir_codproducto(
     facturas_nuevas: pd.DataFrame,
@@ -110,33 +112,56 @@ def inferir_codproducto(
             1.0,
         )
 
+        cand["family_bonus"] = (
+            0.03 * cand["same_family_strict"].astype(float) +
+            0.05 * cand["same_family_soft"].astype(float)
+        )
+
+        cand["same_brand"] = cand["Producto_base_norm"].apply(
+            lambda t: calc_same_brand(f["Producto_base_norm"], t)
+        )
+
+        cand["brand_conflict"] = cand["Producto_base_norm"].apply(
+            lambda t: calc_brand_conflict(f["Producto_base_norm"], t)
+        )
+
+        cand["estructura_ok"] = (
+            cand["presentacion_soft"].astype(int)
+            + cand["factor_match_strict"].astype(int)
+            + cand["content_match_strict"].astype(int)
+            + cand["total_match_strict"].astype(int)
+        ) >= 2
+
+        cand["brand_bonus"] = np.where(
+            cand["estructura_ok"],
+            0.06 * cand["same_brand"] - 0.10 * cand["brand_conflict"],
+            0.02 * cand["same_brand"] - 0.12 * cand["brand_conflict"]
+        )
+
+        cand["presentation_penalty"] = (
+            0.08 * (~cand["factor_match_strict"]).astype(float) +
+            0.10 * (~cand["content_match_strict"]).astype(float) +
+            0.10 * (~cand["total_match_strict"]).astype(float) +
+            0.06 * (~cand["tipo_match_strict"]).astype(float)
+        )
+
+        cand["tipo_none_penalty"] = (
+            (cand["TipoContenido"].astype(str) == "NONE").astype(float) * 0.05
+        )
+
         cand["ScoreFinal"] = (
-            0.68 * cand["ScoreModelo"]
-            + 0.22 * cand[col_heur]
-            + 0.10 * cand["score_presentacion"]
-        ) * (0.25 + 0.75 * cand["LexicalGate"])
-
-        if "same_family_strict" in cand.columns:
-            fam_strict = cand[cand["same_family_strict"] == True].copy()
-            if len(fam_strict) >= top_k:
-                cand = fam_strict
-            else:
-                fam_soft = cand[cand["same_family_soft"] == True].copy()
-                if len(fam_soft) >= top_k:
-                    cand = fam_soft
-
-        if "presentacion_strict" in cand.columns:
-            strict_top = cand[cand["presentacion_strict"] == True].copy()
-            if len(strict_top) >= top_k:
-                cand = strict_top
-            else:
-                soft_top = cand[cand["presentacion_soft"] == True].copy()
-                if len(soft_top) >= top_k:
-                    cand = soft_top
+            0.56 * cand["ScoreModelo"]
+            + 0.14 * cand[col_heur]
+            + 0.18 * cand["score_presentacion"]
+            + cand["family_bonus"]
+            + cand["brand_bonus"]
+            - cand["presentation_penalty"]
+            - cand["tipo_none_penalty"]
+        ) * (0.35 + 0.65 * cand["LexicalGate"])
 
         cand = cand.sort_values(
-            ["same_family_strict", "same_family_soft", "ScoreFinal", "ScoreModelo", col_heur, "tier_presentacion"],
-            ascending=[False, False, False, False, False, True],
+            ["ScoreFinal", "ScoreModelo", col_heur, "tier_presentacion"],
+            ascending=[False, False, False, True],
         ).head(top_k)
 
         cand["Score"] = cand["ScoreFinal"]

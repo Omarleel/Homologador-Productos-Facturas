@@ -6,6 +6,13 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.metrics import (
+    average_precision_score,
+    roc_auc_score,
+    precision_score,
+    recall_score,
+    f1_score,
+)
 from . import ModelConfig, PreprocessingAssets, ModelPersistence, MatchModelBuilder, ThresholdOptimizer, SampleWeightStrategy, DatasetBuilder
 
 class ModeloMatchProducto:
@@ -175,18 +182,13 @@ class ModeloMatchProducto:
         ds = self._to_ds(pares.assign(label=0), batch_size=batch_size, shuffle=False)
         return self.model.predict(ds, verbose=0).reshape(-1)
     
-    def fit_incremental(
+
+    def split_train_valid(
         self,
         pares: pd.DataFrame,
-        epochs: int = 6,
-        batch_size: int = 256,
-        recalcular_threshold: bool = True,
-    ) -> None:
-        if self.model is None:
-            raise RuntimeError(
-                "Debes cargar un modelo existente antes de hacer reentrenamiento incremental."
-            )
-
+        test_size: float = 0.2,
+        random_state: int = 42,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         groups = (
             pares["RucProveedor"].astype(str).fillna("")
             + "|"
@@ -195,11 +197,66 @@ class ModeloMatchProducto:
             + pares["fact_text"].astype(str).fillna("")
         )
 
-        gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        gss = GroupShuffleSplit(
+            n_splits=1,
+            test_size=test_size,
+            random_state=random_state,
+        )
         train_idx, valid_idx = next(gss.split(pares, pares["label"], groups=groups))
 
         train_df = pares.iloc[train_idx].copy().reset_index(drop=True)
         valid_df = pares.iloc[valid_idx].copy().reset_index(drop=True)
+        return train_df, valid_df
+
+
+    def evaluate_pairs(
+        self,
+        pares: pd.DataFrame,
+        batch_size: int = 512,
+    ) -> dict:
+        if self.model is None:
+            raise RuntimeError("Debes entrenar o cargar el modelo antes de evaluar.")
+
+        ds = self._to_ds(pares, batch_size=batch_size, shuffle=False)
+        y_true = pares["label"].astype(int).values
+        probs = self.model.predict(ds, verbose=0).reshape(-1)
+
+        best_th, best_f1, best_precision, best_recall = ThresholdOptimizer.find_best(
+            y_true=y_true,
+            probs=probs,
+        )
+
+        y_hat_current = (probs >= float(self.best_threshold)).astype(int)
+
+        metrics = {
+            "n_samples": int(len(pares)),
+            "positive_rate": float(np.mean(y_true)),
+            "pr_auc": float(average_precision_score(y_true, probs)),
+            "roc_auc": float(roc_auc_score(y_true, probs)),
+            "best_threshold_eval": float(best_th),
+            "best_f1_eval": float(best_f1),
+            "best_precision_eval": float(best_precision),
+            "best_recall_eval": float(best_recall),
+            "current_threshold": float(self.best_threshold),
+            "current_f1": float(f1_score(y_true, y_hat_current, zero_division=0)),
+            "current_precision": float(precision_score(y_true, y_hat_current, zero_division=0)),
+            "current_recall": float(recall_score(y_true, y_hat_current, zero_division=0)),
+        }
+        return metrics
+
+
+    def fit_incremental_on_split(
+        self,
+        train_df: pd.DataFrame,
+        valid_df: pd.DataFrame,
+        epochs: int = 6,
+        batch_size: int = 256,
+        recalcular_threshold: bool = True,
+    ) -> dict:
+        if self.model is None:
+            raise RuntimeError(
+                "Debes cargar un modelo existente antes de hacer reentrenamiento incremental."
+            )
 
         sample_weight = SampleWeightStrategy.compute(train_df)
 
@@ -233,7 +290,7 @@ class ModeloMatchProducto:
             ),
         ]
 
-        self.model.fit(
+        history = self.model.fit(
             ds_train,
             validation_data=ds_valid,
             epochs=epochs,
@@ -255,8 +312,27 @@ class ModeloMatchProducto:
                 f"Nuevo umbral incremental: {self.best_threshold:.2f} | "
                 f"F1={best_score:.4f} | precision={best_precision:.4f} | recall={best_recall:.4f}"
             )
-        else:
-            print(
-                f"Reentrenamiento incremental finalizado. "
-                f"Se conserva best_threshold={self.best_threshold:.2f}"
-            )
+
+        return {
+            "epochs_ran": int(len(history.history.get("loss", []))),
+            "history": {
+                k: [float(v) for v in vals]
+                for k, vals in history.history.items()
+            },
+        }
+
+    def fit_incremental(
+        self,
+        pares: pd.DataFrame,
+        epochs: int = 6,
+        batch_size: int = 256,
+        recalcular_threshold: bool = True,
+    ) -> None:
+        train_df, valid_df = self.split_train_valid(pares)
+        self.fit_incremental_on_split(
+            train_df=train_df,
+            valid_df=valid_df,
+            epochs=epochs,
+            batch_size=batch_size,
+            recalcular_threshold=recalcular_threshold,
+        )

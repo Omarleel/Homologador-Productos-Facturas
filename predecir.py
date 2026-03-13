@@ -15,7 +15,7 @@ from core.model import ModeloMatchProducto
 
 MODELO_NOMBRE = "homologacion_v2"
 ARCHIVO_MAESTRO = "maestro.csv"
-ARCHIVO_FACTURAS_NUEVAS = "facturas_nuevas.csv"
+ARCHIVO_FACTURAS_NUEVAS = "facturas_nuevas_v2.csv"
 
 ARCHIVO_RESULTADO_TECNICO = "resultado_inferencia.csv"
 ARCHIVO_RESULTADO_RESUMIDO = "match_final_resumido.csv"

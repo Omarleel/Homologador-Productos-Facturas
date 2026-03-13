@@ -214,20 +214,6 @@ FAMILY_STOPWORDS = {
 }
 
 
-def _tokens_familia(texto: str) -> list[str]:
-    toks = [t for t in normalizar_texto(texto).split() if t]
-    salida = []
-    for t in toks:
-        if t in FAMILY_STOPWORDS:
-            continue
-        if t.isdigit():
-            continue
-        if len(t) <= 2:
-            continue
-        salida.append(t)
-    return salida
-
-
 def _features_familia(fila_factura: pd.Series, fila_maestro: pd.Series) -> dict:
     fact = _to_text(fila_factura.get("Producto_base_norm", ""))
     mast = _to_text(fila_maestro.get("Producto_base_norm", ""))
@@ -658,3 +644,15 @@ def _tipo_match_strict(fila_factura: pd.Series, fila_maestro: pd.Series) -> bool
         return True
 
     return tf == tm
+
+def extraer_marcas(texto: str) -> set[str]:
+    toks = set(normalizar_texto(texto).split())
+    return {m for m in BONUS_MARCA_CLAVES if m in toks}
+
+def calc_same_brand(fact_text: str, master_text: str) -> int:
+    return int(bool(extraer_marcas(fact_text) & extraer_marcas(master_text)))
+
+def calc_brand_conflict(fact_text: str, master_text: str) -> int:
+    mf = extraer_marcas(fact_text)
+    mm = extraer_marcas(master_text)
+    return int(bool(mf) and bool(mm) and not (mf & mm))

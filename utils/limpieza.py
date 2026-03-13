@@ -61,6 +61,11 @@ MEASURE_ALIASES = {
     "LTS": "LT",
     "LTR": "LT",
     "L": "L",
+    "LB": "LB",
+    "LIBRAS": "LB",
+    "LIBRA": "LB",
+    "ONZA": "OZ",
+    "ONZAS": "OZ",
 }
 
 DIM_ALIASES = {
@@ -350,6 +355,9 @@ def _token_numero(token: str) -> Optional[float]:
     token = token.strip().strip(".")
     if re.fullmatch(r"\d+(?:\.\d+)?", token):
         return float(token)
+    if re.fullmatch(r"\d+/\d+", token):
+        num, den = token.split("/")
+        return float(num) / float(den) if float(den) != 0 else None
     return None
 
 
@@ -360,15 +368,19 @@ def _token_word(token: str) -> str:
 def _convertir_unidad_contenido(valor: float, unidad: str) -> Tuple[float, str]:
     unidad = unidad.upper()
     if unidad == "MG":
-        return valor / 1000.0, "MASS"   # gramos
+        return valor / 1000.0, "MASS"
     if unidad in {"GR", "G"}:
-        return valor, "MASS"            # gramos
+        return valor, "MASS"
     if unidad == "KG":
-        return valor * 1000.0, "MASS"   # gramos
+        return valor * 1000.0, "MASS"
+    if unidad == "LB":
+        return valor * 453.592, "MASS" 
+    if unidad == "OZ":
+        return valor * 28.3495, "MASS"
     if unidad in {"ML", "CC"}:
-        return valor, "VOLUME"          # ml
+        return valor, "VOLUME"
     if unidad in {"LT", "L"}:
-        return valor * 1000.0, "VOLUME" # ml
+        return valor * 1000.0, "VOLUME"
     return 0.0, "NONE"
 
 
